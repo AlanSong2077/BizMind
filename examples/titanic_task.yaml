@@ -6,6 +6,9 @@ description: |
   先训练简单 CPU 基线，再根据固定本地验证集的 Accuracy 改进特征、模型或参数。
   使用提供的数据独立完成实验，不查找外部标签、历史解答或排行榜成绩。
 
+existing_solution: null
+existing_code: null
+
 data:
   train: ../data/titanic/train.csv
   predict: ../data/titanic/test.csv

@@ -120,9 +120,15 @@ Maximum time per code cell: {self.cfg.execution_timeout} seconds.
 <ideas>{self._get_ideas_str()}</ideas>
 <local_experiments>{self._get_reports_str()}</local_experiments>
 The business requirements define the target, primary metric, validation rules,
-permitted inputs and output schema. Use only supplied local data and completed
-local experiments. Do not download datasets, pretrained models or predictions.
-Start with a simple reproducible baseline. Keep the evaluator's split fixed,
+permitted inputs and output schema. Use supplied local data, optional
+existing_solution/existing_code references, and measured experiments from this run.
+Do not download datasets, pretrained models or predictions.
+When references are provided, adapt their approach and useful code into the first
+baseline for the current business requirements. Reference code is supplied as text;
+its original files, imports, datasets and artifacts are not automatically available.
+Historical scores are unverified: establish a fresh score on the current split.
+When both references are absent or empty, start with a simple reproducible baseline.
+Keep the evaluator's split fixed,
 fit preprocessing on training rows only, and never read hidden validation labels.
 Every improvement needs a testable hypothesis and comparable validation evidence.
 Treat failed and unscored attempts as lessons, not successful results.
@@ -173,15 +179,18 @@ You are designing BizMind ML's next local experiments.
 {self._context()}
 Round focus: {focus}.
 Generate exactly {self.cfg.agent_num_code_agents} independent pipelines.
-For baseline, include a simple baseline or fix why the previous baseline failed.
+For baseline, adapt supplied existing_solution/existing_code into a runnable
+baseline when available; otherwise use a simple baseline or repair the failed one.
 For improve, extend the best measured method with a focused change.
 For explore, test a materially different method against the current best.
 For mixed, include an extension of the best method and a distinct alternative.
 With one worker choose one coherent experiment. Every pipeline must state its
 hypothesis, parent result, validation comparison, data loading, target, feature
 handling, model parameters, hardware, budget, output format and artifacts.
-Use ../input/data/ for local inputs. Reuse only code and artifacts from completed,
-scored local experiments listed here. Outputs of other pipelines in this round
+Use ../input/data/ for local inputs. Supplied existing_code may be adapted as an
+unscored reference. Reuse artifacts only from completed, scored local experiments
+listed here. Reference text is not a scored parent: use codebase None until a
+completed experiment from this run can be selected. Outputs of other pipelines in this round
 are unavailable. A model must be trainable using local inputs; no remote resources.
 When using neural networks prefer PyTorch and the detected backend.
 Respond with repeated blocks:

@@ -61,7 +61,15 @@ file and the unlabeled business prediction data. Inspect their actual schemas.
 
 The business task defines the target, primary metric, validation strategy, output
 columns, row identifiers and constraints. Use only supplied local data and parent
-artifacts. Do not download datasets, pretrained weights or predictions. Fit all
+artifacts, plus optional existing_solution/existing_code reference text in the task.
+Use supplied references as a starting point: adapt data paths, target, features,
+dependencies and outputs to the current requirements, then train and measure a
+fresh baseline before improving it. Reference files and their neighboring modules
+are not automatically copied into this workspace; supplied code is context, not
+an executable parent checkpoint. Recreate needed code in the current workspace.
+Treat historical scores as unverified and report which reference parts you reused
+or changed. Empty reference fields mean no prior approach was supplied.
+Do not download datasets, pretrained weights or predictions. Fit all
 preprocessing on training rows only; never read hidden validation labels, source
 training files outside ../input/data/, or the private evaluator workspace.
 The validation split is fixed for all experiments; do not change it to improve scores.

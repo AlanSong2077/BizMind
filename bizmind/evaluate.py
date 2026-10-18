@@ -70,6 +70,9 @@ Generate two self-contained Python 3 scripts for this business task:
 
 The task defines the target, identifier columns, primary metric, metric direction,
 output schema, constraints and validation strategy. Inspect actual input files.
+Optional existing_solution/existing_code fields are background references only.
+Use the current task's evaluation and output requirements to define the split
+and scorer; historical scores or validation rules in reference code do not override them.
 Use only supplied local data; do not download resources or fabricate missing data.
 The source data is read-only. Scripts must run on CPU with the current interpreter.
 

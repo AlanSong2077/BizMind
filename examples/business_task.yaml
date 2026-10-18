@@ -6,6 +6,11 @@ description: |
   这是一个表格二分类任务。禁止使用预测时点后的信息。
   先建立简单基线，再在本地验证集上优化主指标。
 
+# 可选：填写多行文本，或使用 {path: ./solution.md} / {path: ./baseline.py}。
+# path 相对于本任务文件；省略、null 或空字符串均表示未提供。
+existing_solution: null
+existing_code: null
+
 data:
   train: ../data/train.csv
   predict: ../data/test.csv

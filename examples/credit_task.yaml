@@ -7,6 +7,9 @@ description: |
   训练集正类为 10026 行，约 6.684%；主指标为 ROC-AUC，不能用多数类 Accuracy 代替。
   先建立可执行的 CPU 基线，再根据固定验证集的实测 ROC-AUC 改进。
 
+existing_solution: null
+existing_code: null
+
 data:
   train: ../data/give_me_some_credit/train.csv
   predict: ../data/give_me_some_credit/test.csv

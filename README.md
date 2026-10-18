@@ -40,6 +40,23 @@ selection without establishing a gain on a new independent holdout.
 
 ## Run locally
 
+Task YAML files accept two optional inputs: `existing_solution` and `existing_code`.
+Omit them or use `null` / an empty string to start without prior references. Both
+accept multiline text or a UTF-8 text file via `path`, resolved relative to the
+task YAML. For example:
+
+```yaml
+existing_solution: |
+  Use median imputation and LightGBM; improve recall under the new requirements.
+existing_code:
+  path: ./baseline.py
+```
+
+To paste code directly, use `existing_code: |` followed by indented code. Reference
+text reaches the planner and coding agent; it is not executed during input loading
+and neighboring files are not copied automatically. The agent adapts the reference
+to the current task and measures a fresh baseline before iterating.
+
 Training and prediction CSVs are included in [data/](data/README.md). Install the
 dependencies, put your `DEEPSEEK_API_KEY` in `.env`, then run from the project root:
 

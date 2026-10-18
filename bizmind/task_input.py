@@ -4,6 +4,29 @@ from pathlib import Path
 import yaml
 
 
+def _load_reference(value, directory: Path, field: str) -> str | None:
+    """Resolve optional reference text without importing or executing supplied code."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value if value.strip() else None
+    if (not isinstance(value, dict) or set(value) != {"path"}
+            or not isinstance(value["path"], str) or not value["path"].strip()):
+        raise ValueError(f"{field} must be text, null, or a mapping with a nonempty path.")
+    source = (directory / Path(value["path"]).expanduser()).resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"{field} file not found: {source}")
+    if not source.is_file():
+        raise ValueError(f"{field}.path must point to a UTF-8 text file: {source}")
+    try:
+        text = source.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{field}.path must point to a UTF-8 text file: {source}") from error
+    if "\x00" in text:
+        raise ValueError(f"{field}.path must point to a UTF-8 text file: {source}")
+    return text if text.strip() else None
+
+
 def load_custom_task(cfg) -> str:
     if cfg.task_input_file is None:
         raise ValueError("A business task requires task.input_file or --task-file.")
@@ -35,6 +58,9 @@ def load_custom_task(cfg) -> str:
         business["data"] = metadata
     if not business:
         raise ValueError("The task file must include business requirements, not only data paths.")
+    for field in ("existing_solution", "existing_code"):
+        if field in business:
+            business[field] = _load_reference(business[field], task_file.parent, field)
     return yaml.safe_dump(business, allow_unicode=True, sort_keys=False)
 
 
