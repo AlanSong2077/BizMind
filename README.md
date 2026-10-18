@@ -11,8 +11,7 @@ across all rounds. Scores below are local validation results.
 | Titanic | 712 / 179 | 418 | 3 | Equal-weight LogisticRegression + ExtraTrees probabilities | **0.8492 accuracy** |
 | Give Me Some Credit| 120,000 / 30,000 | 101,503 | 2 | LightGBM with 33 features and a 24-seed probability average | **0.8705 ROC-AUC** |
 
-
-### Iteration 
+## Summary
 
 Agent finished a good model selection task before running code, and agents contains multiple code-and-evaluation steps on the same fixed split while running.
 
