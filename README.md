@@ -1,1 +1,1 @@
-BizMind is an AI agent for business-driven machine learning that improves models through iterative local experiments and validation.
+BizMind is an AI agent for business-driven machine learning that improves models through iterative local experiments and validation. This project is adapted based on Comind.
