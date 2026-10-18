@@ -3,11 +3,14 @@ from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from bizmind.config import Config
 from bizmind.task_input import load_custom_task, stage_custom_data
 
 
 def main():
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
     parser = ArgumentParser(description="BizMind ML — local, self-iterating ML experiments")
     parser.add_argument("--config", type=Path, default=Path("bizmind.yaml"))
     parser.add_argument("--task-id", type=str, help="Local task name used in the run directory")

@@ -68,12 +68,16 @@ regression with numeric imputation/scaling and categorical imputation/one-hot
 encoding. Both validation and test predictions use the same model fitted on the
 712-row training subset.
 
-For the actual DeepSeek-driven self-iteration, set `DEEPSEEK_API_KEY` in your
-terminal, then run:
+For the actual DeepSeek-driven self-iteration, copy `.env.example` to `.env` in
+the project root and fill in your own `DEEPSEEK_API_KEY`, then run:
 
 ```sh
 ./start.sh --config examples/local_training.yaml
 ```
+
+The entry point loads `.env` automatically. A key already exported in your
+terminal takes precedence. `.env` is ignored by Git; never paste a real key into
+the shared YAML configuration or commit it.
 
 The configuration runs three sequential CPU experiment rounds. The evaluator
 creates the fixed split and scores model predictions. Only the two input CSVs are

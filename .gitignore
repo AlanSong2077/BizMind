@@ -10,5 +10,8 @@ CO-Bench
 run.sh
 
 .venv/
+.env
+.env.*
+!.env.example
 build/
 dist/

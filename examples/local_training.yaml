@@ -7,7 +7,7 @@ task:
 llm:
   model: deepseek/deepseek-flash
   api_base: https://api.deepseek.com
-  # Set DEEPSEEK_API_KEY in your terminal; keep credentials out of this file.
+  # Set DEEPSEEK_API_KEY in the project .env or terminal; keep it out of this file.
   max_retries: 3
   timeout: 600
   max_tokens: 16384

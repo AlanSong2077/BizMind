@@ -13,6 +13,7 @@ protobuf==6.32.0
 psutil==7.0.0
 pyarrow==21.0.0
 pytorch_crf==0.7.2
+python-dotenv==1.2.4
 PyYAML==6.0.2
 rdkit==2025.3.6
 rich==14.1.0
