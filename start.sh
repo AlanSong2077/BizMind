@@ -6,6 +6,17 @@ set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$project_dir"
 
+# macOS wheels can bundle different OpenMP runtimes. Load one shared copy
+# before Python starts so mixed scikit-learn/LightGBM/PyTorch training is stable.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    for openmp_dir in /opt/homebrew/opt/libomp/lib /usr/local/opt/libomp/lib; do
+        if [[ -f "$openmp_dir/libomp.dylib" ]]; then
+            export DYLD_LIBRARY_PATH="$openmp_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+            break
+        fi
+    done
+fi
+
 if [[ -n "${BIZMIND_PYTHON:-}" ]]; then
     python_bin="$BIZMIND_PYTHON"
 elif [[ -x "$project_dir/.venv/bin/python" ]]; then
