@@ -1,0 +1,30 @@
+# Run: ./start.sh --config examples/credit_training.yaml
+task:
+  id: credit-risk-local
+  input_file: ./examples/credit_task.yaml
+
+llm:
+  model: deepseek/deepseek-flash
+  api_base: https://api.deepseek.com
+  # Read DEEPSEEK_API_KEY from the existing project .env.
+  max_retries: 3
+  timeout: 600
+  max_tokens: 16384
+  extra_body:
+    thinking:
+      type: disabled
+
+agent:
+  num_code_agents: 1
+  num_iterations: 2
+  num_iterations_code_agents: 8
+  time_limit_code_agents: 1800
+  workspace_dir: workspace
+  prediction_file_name: predictions.csv
+
+execution:
+  device: cpu
+  max_gpu_count: 0
+  max_cpu_cores: 4
+  timeout: 300
+  inspect_interval: 30

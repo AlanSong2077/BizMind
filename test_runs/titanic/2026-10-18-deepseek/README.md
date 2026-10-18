@@ -66,7 +66,7 @@ files and kernel connection files are excluded.
 
 ## Reproduce without an API key
 
-Install the project dependencies and place the official Titanic CSV files in
+Install the project dependencies and use the included Titanic CSV files in
 `data/titanic/` as described in
 [the local test instructions](../../../examples/titanic_description.md).
 Run these commands from the project root, using a fresh replay directory:

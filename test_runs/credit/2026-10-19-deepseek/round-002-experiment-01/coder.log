@@ -1,0 +1,2051 @@
+[2026-10-19 00:10:19,918 coder-round-001-experiment-01 INFO] Code iteration 1: Establish the reproducible LightGBM baseline and write both complete prediction files. Runtime ~60-120s. Expected output: audit summary, internal holdout AUC printed, validation_predictions.csv (30000 rows) and predictions.csv (101503 rows). This directly tests whether a median-imputed LightGBM beats 0.5 on the fixed validation set (evaluator scores it).
+import os, glob, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+TRAIN = f"{BASE}/train_data/train.csv"
+TEST  = f"{BASE}/predict_data/test.csv"
+VAL   = f"{BASE}/validation_data/validation_features.csv"
+
+train = pd.read_csv(TRAIN)
+test  = pd.read_csv(TEST)
+val   = pd.read_csv(VAL)
+print("shapes train/test/val:", train.shape, test.shape, val.shape)
+print("train cols:", list(train.columns))
+print("val cols:", list(val.columns))
+assert "SeriousDlqin2yrs" in train.columns
+assert "Id" in test.columns and "Id" in val.columns
+
+features = [c for c in train.columns if c not in ("Id", "SeriousDlqin2yrs")]
+print("features:", features)
+y = train["SeriousDlqin2yrs"].values
+
+# ---- data-quality audit ----
+audit = {"n_train": int(len(train)), "pos_rate": float(train.SeriousDlqin2yrs.mean()),
+         "missing": train[features].isna().sum().to_dict(),
+         "ru_gt1": int((train["RevolvingUtilizationOfUnsecuredLines"] > 1).sum())}
+for c in ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]:
+    audit[f"{c}_sentinel_96_98"] = int(train[c].isin([96,98]).sum())
+audit["DebtRatio_q"] = {str(k): float(v) for k,v in train["DebtRatio"].quantile([.5,.9,.99,.995]).items()}
+audit["MonthlyIncome_q"] = {str(k): float(v) for k,v in train["MonthlyIncome"].quantile([.5,.9,.99,.995]).items()}
+audit["dup_feature_rows"] = int(train[features].duplicated().sum())
+print(json.dumps(audit, indent=2, default=str))
+
+# ---- median impute, fit ONLY on 120k train ----
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+print("medians:", medians)
+def prep(df):
+    X = df[features].copy()
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    return X
+
+Xfree_full = prep(train)
+Xte  = prep(test)
+Xval = prep(val)
+
+# internal holdout for early stopping (fixed val labels never touched here)
+Xtr, Xho, ytr, yho = train_test_split(Xfree_full, y, test_size=0.15, stratify=y, random_state=SEED)
+
+model = lgb.LGBMClassifier(objective="binary", num_leaves=31, learning_rate=0.05,
+                           n_estimators=600, subsample=0.9, colsample_bytree=0.9,
+                           random_state=SEED, n_jobs=4, metric="auc", verbose=-1)
+model.fit(Xtr, ytr, eval_set=[(Xho, yho)], eval_metric="auc",
+          callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)])
+ho_auc = roc_auc_score(yho, model.predict_proba(Xho)[:,1])
+print("holdout AUC:", ho_auc, "best_iter:", model.best_iteration_)
+
+val_prob  = model.predict_proba(Xval)[:,1]
+test_prob = model.predict_proba(Xte)[:,1]
+for nm, p in [("val", val_prob), ("test", test_prob)]:
+    assert np.isfinite(p).all() and p.min() >= 0 and p.max() <= 1, nm
+print("val_prob range:", val_prob.min(), val_prob.max())
+
+# ---- outputs ----
+os.makedirs("artifacts", exist_ok=True)
+val_out = pd.DataFrame({"Id": val["Id"].values, "Probability": val_prob})
+assert len(val_out) == 30000 and val_out["Id"].is_unique
+val_out.to_csv("validation_predictions.csv", index=False)
+
+pred_out = pd.DataFrame({"Id": test["Id"].values, "Probability": test_prob})
+assert len(pred_out) == 101503 and list(pred_out.columns) == ["Id","Probability"]
+assert pred_out["Id"].is_unique
+pred_out.to_csv("predictions.csv", index=False)
+
+# ---- artifacts ----
+model.booster_.save_model("artifacts/lgbm_baseline.txt")
+json.dump({"medians": medians, "features": features, "holdout_auc": ho_auc,
+           "best_iteration": int(model.best_iteration_), "audit": audit,
+           "params": {"num_leaves":31,"lr":0.05,"n_estimators":600,"seed":SEED,"n_jobs":4}},
+          open("artifacts/run_meta.json","w"), indent=2, default=str)
+with open("artifacts/run_log.txt","w") as f:
+    f.write(f"LightGBM median-impute baseline\nholdout_auc={ho_auc:.6f}\n"
+            f"best_iteration={model.best_iteration_}\nfeatures={features}\n"
+            f"impute_medians={medians}\n")
+with open("artifacts/README.md","w") as f:
+    f.write("# Inference\n1) read features list from run_meta.json\n"
+            "2) fillna MonthlyIncome/NumberOfDependents with stored medians\n"
+            "3) booster.predict -> pos prob\n")
+print("done; rows:", len(val_out), len(pred_out))
+[2026-10-19 00:10:22,421 coder-round-001-experiment-01 INFO] Execution time: 1.71 seconds; success: True.
+<output>shapes train/test/val: (120000, 12) (101503, 11) (30000, 11)
+train cols: ['Id', 'SeriousDlqin2yrs', 'RevolvingUtilizationOfUnsecuredLines', 'age', 'NumberOfTime30-59DaysPastDueNotWorse', 'DebtRatio', 'MonthlyIncome', 'NumberOfOpenCreditLinesAndLoans', 'NumberOfTimes90DaysLate', 'NumberRealEstateLoansOrLines', 'NumberOfTime60-89DaysPastDueNotWorse', 'NumberOfDependents']
+val cols: ['Id', 'RevolvingUtilizationOfUnsecuredLines', 'age', 'NumberOfTime30-59DaysPastDueNotWorse', 'DebtRatio', 'MonthlyIncome', 'NumberOfOpenCreditLinesAndLoans', 'NumberOfTimes90DaysLate', 'NumberRealEstateLoansOrLines', 'NumberOfTime60-89DaysPastDueNotWorse', 'NumberOfDependents']
+features: ['RevolvingUtilizationOfUnsecuredLines', 'age', 'NumberOfTime30-59DaysPastDueNotWorse', 'DebtRatio', 'MonthlyIncome', 'NumberOfOpenCreditLinesAndLoans', 'NumberOfTimes90DaysLate', 'NumberRealEstateLoansOrLines', 'NumberOfTime60-89DaysPastDueNotWorse', 'NumberOfDependents']
+{
+  "n_train": 120000,
+  "pos_rate": 0.06684166666666666,
+  "missing": {
+    "RevolvingUtilizationOfUnsecuredLines": 0,
+    "age": 0,
+    "NumberOfTime30-59DaysPastDueNotWorse": 0,
+    "DebtRatio": 0,
+    "MonthlyIncome": 23675,
+    "NumberOfOpenCreditLinesAndLoans": 0,
+    "NumberOfTimes90DaysLate": 0,
+    "NumberRealEstateLoansOrLines": 0,
+    "NumberOfTime60-89DaysPastDueNotWorse": 0,
+    "NumberOfDependents": 3128
+  },
+  "ru_gt1": 2640,
+  "NumberOfTime30-59DaysPastDueNotWorse_sentinel_96_98": 214,
+  "NumberOfTimes90DaysLate_sentinel_96_98": 214,
+  "NumberOfTime60-89DaysPastDueNotWorse_sentinel_96_98": 214,
+  "DebtRatio_q": {
+    "0.5": 0.36619425,
+    "0.9": 1263.0,
+    "0.99": 4977.0,
+    "0.995": 6185.0
+  },
+  "MonthlyIncome_q": {
+    "0.5": 5390.0,
+    "0.9": 11640.600000000006,
+    "0.99": 25000.0,
+    "0.995": 35000.0
+  },
+  "dup_feature_rows": 464
+}
+medians: {'MonthlyIncome': 5390.0, 'NumberOfDependents': 0.0}
+holdout AUC: 0.8667435616075804 best_iter: 119
+val_prob range: 0.0039258925875586565 0.854287009686859
+done; rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8680). Best so far: Metric(0.8680).
+
+[2026-10-19 00:10:27,958 coder-round-001-experiment-01 INFO] Code iteration 2: Test whether domain-aware feature engineering improves ROC-AUC over the 0.8680 baseline. Given the audit  214 rows with delinquency sentinel codes 96/98, 2640 rows with revolving utilization > 1, and a right-heavy DebtRatio/MonthlyIncome tail  I'll add engineered features (sentinel flag, utilization clipping, DebtRatio=income-like flag, MonthlyIncome missing flag, delinquency sum) and keep the same LightGBM config. Internal holdout AUC (not the fixed validation labels) drives the decision to keep this. Runtime ~90-140s. Writes both complete outputs regardless.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    # missing flags BEFORE impute
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    # sentinel flag across delinquency cols
+    sent = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    X["delinq_sentinel"] = sent
+    # use sentinel rows' delinquency as capped values (set to a high but finite count)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    # utilization handling
+    X["ru_clipped"] = X["RevolvingUtilizationOfUnsecuredLines"].clip(0, 1.5)
+    X["ru_gt1_flag"] = (X["RevolvingUtilizationOfUnsecuredLines"] > 1).astype(int)
+    # DebtRatio is income-like for large values (likely income mis-entered)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    # fill missing
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    # engineered aggregates
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    return X
+
+features = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+            'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+            'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+            'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+            'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income']
+
+Xf_full = build(train)[features]
+Xte = build(test)[features]
+Xval = build(val)[features]
+y = train["SeriousDlqin2yrs"].values
+
+Xtr, Xho, ytr, yho = train_test_split(Xf_full, y, test_size=0.15, stratify=y, random_state=SEED)
+model = lgb.LGBMClassifier(objective="binary", num_leaves=31, learning_rate=0.05,
+                           n_estimators=800, subsample=0.9, colsample_bytree=0.9,
+                           random_state=SEED, n_jobs=4, metric="auc", verbose=-1)
+model.fit(Xtr, ytr, eval_set=[(Xho, yho)], eval_metric="auc",
+          callbacks=[lgb.early_stopping(60, verbose=False), lgb.log_evaluation(0)])
+ho_auc = roc_auc_score(yho, model.predict_proba(Xho)[:,1])
+print("holdout AUC:", ho_auc, "best_iter:", model.best_iteration_, "(baseline 0.86674)")
+
+val_prob  = model.predict_proba(Xval)[:,1]
+test_prob = model.predict_proba(Xte)[:,1]
+for nm,p in [("val",val_prob),("test",test_prob)]:
+    assert np.isfinite(p).all() and p.min()>=0 and p.max()<=1, nm
+
+os.makedirs("artifacts", exist_ok=True)
+pd.DataFrame({"Id":val["Id"].values,"Probability":val_prob}).to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":test_prob})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+
+model.booster_.save_model("artifacts/lgbm_fe.txt")
+json.dump({"medians":medians,"features":features,"holdout_auc":ho_auc,
+           "best_iteration":int(model.best_iteration_),
+           "params":{"num_leaves":31,"lr":0.05,"n_estimators":800,"seed":SEED,"n_jobs":4}},
+          open("artifacts/run_meta_fe.json","w"), indent=2, default=str)
+with open("artifacts/run_log.txt","a") as f:
+    f.write(f"[FE] holdout_auc={ho_auc:.6f} best_iter={model.best_iteration_}\n")
+print("done rows:", len(val), len(po))
+[2026-10-19 00:10:29,539 coder-round-001-experiment-01 INFO] Execution time: 0.89 seconds; success: True.
+<output>holdout AUC: 0.8668302651321529 best_iter: 98 (baseline 0.86674)
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8685). Best so far: Metric(0.8685).
+
+[2026-10-19 00:10:37,006 coder-round-001-experiment-01 INFO] Code iteration 3: Test whether blending the FE model with a second model of different inductive bias improves ROC-AUC over the 0.8685 FE result. Rank-averaging an FE-LightGBM with a regularized logistic regression (on the same engineered+standardized features) is a low-variance ensemble that often lifts AUC on tabular credit data. Decision is driven by the internal holdout AUC; both complete outputs are written from the same blended ensemble so val/pred stay consistent. Runtime ~120-180s.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from scipy.stats import rankdata
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    X["ru_clipped"] = X["RevolvingUtilizationOfUnsecuredLines"].clip(0, 1.5)
+    X["ru_gt1_flag"] = (X["RevolvingUtilizationOfUnsecuredLines"] > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    return X
+
+features = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+            'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+            'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+            'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+            'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income']
+
+Xf_full = build(train)[features]; Xte = build(test)[features]; Xval = build(val)[features]
+y = train["SeriousDlqin2yrs"].values
+Xtr, Xho, ytr, yho = train_test_split(Xf_full, y, test_size=0.15, stratify=y, random_state=SEED)
+
+# --- LGBM ---
+lgbm = lgb.LGBMClassifier(objective="binary", num_leaves=31, learning_rate=0.05,
+                          n_estimators=800, subsample=0.9, colsample_bytree=0.9,
+                          random_state=SEED, n_jobs=4, metric="auc", verbose=-1)
+lgbm.fit(Xtr, ytr, eval_set=[(Xho, yho)], eval_metric="auc",
+         callbacks=[lgb.early_stopping(60, verbose=False), lgb.log_evaluation(0)])
+ho_l = lgbm.predict_proba(Xho)[:,1]; auc_l = roc_auc_score(yho, ho_l)
+
+# --- Logistic (log1p on heavy tails, scale on train) ---
+def prep_lr(Xfit_ref, *dss):
+    out = []
+    fit_df = Xfit_ref.copy()
+    for c in ["DebtRatio","MonthlyIncome","debt_per_income","income_per_dependent"]:
+        fit_df[c] = np.log1p(np.clip(fit_df[c], -0.999, None))
+    scaler = StandardScaler().fit(fit_df)
+    for ds in dss:
+        d = ds.copy()
+        for c in ["DebtRatio","MonthlyIncome","debt_per_income","income_per_dependent"]:
+            d[c] = np.log1p(np.clip(d[c], -0.999, None))
+        out.append(scaler.transform(d))
+    return out
+Xtr_s, Xho_s, Xte_s, Xval_s = prep_lr(Xtr, Xtr, Xho, Xte, Xval)
+lr = LogisticRegression(C=0.5, max_iter=2000, n_jobs=4, random_state=SEED)
+lr.fit(Xtr_s, ytr)
+ho_lr = lr.predict_proba(Xho_s)[:,1]; auc_lr = roc_auc_score(yho, ho_lr)
+print(f"holdout AUC LGBM={auc_l:.6f} LR={auc_lr:.6f} best_iter={lgbm.best_iteration_}")
+
+# rank-average blend on holdout to pick weight
+r_l = rankdata(ho_l)/len(ho_l); r_lr = rankdata(ho_lr)/len(ho_lr)
+best_w, best_auc = 1.0, auc_l
+for w in np.linspace(0,1,21):
+    a = roc_auc_score(yho, w*r_l + (1-w)*r_lr)
+    if a > best_auc: best_auc, best_w = a, w
+print(f"blend best_w(LGBM)={best_w:.2f} blend_holdout_auc={best_auc:.6f}")
+
+# --- refit both on FULL 120k train (same configs, fixed n_estimators) ---
+n_it = max(50, lgbm.best_iteration_ or 200)
+lgbm_full = lgb.LGBMClassifier(objective="binary", num_leaves=31, learning_rate=0.05,
+                               n_estimators=n_it, subsample=0.9, colsample_bytree=0.9,
+                               random_state=SEED, n_jobs=4, verbose=-1)
+lgbm_full.fit(Xf_full, y)
+# scaler refit on full train
+train_lr_full = Xf_full.copy()
+for c in ["DebtRatio","MonthlyIncome","debt_per_income","income_per_dependent"]:
+    train_lr_full[c] = np.log1p(np.clip(train_lr_full[c], -0.999, None))
+scaler_full = StandardScaler().fit(train_lr_full)
+def lr_transform(df):
+    d = df.copy()
+    for c in ["DebtRatio","MonthlyIncome","debt_per_income","income_per_dependent"]:
+        d[c] = np.log1p(np.clip(d[c], -0.999, None))
+    return scaler_full.transform(d)
+lr_full = LogisticRegression(C=0.5, max_iter=2000, n_jobs=4, random_state=SEED)
+lr_full.fit(lr_transform(Xf_full), y)
+
+def blend(prob_l, prob_r):
+    rl = rankdata(prob_l)/len(prob_l); rr = rankdata(prob_r)/len(prob_r)
+    s = best_w*rl + (1-best_w)*rr
+    s = (s - s.min())/(s.max()-s.min()+1e-12)
+    return s
+
+pv = blend(lgbm_full.predict_proba(Xval)[:,1], lr_full.predict_proba(lr_transform(Xval))[:,1])
+pt = blend(lgbm_full.predict_proba(Xte)[:,1],  lr_full.predict_proba(lr_transform(Xte))[:,1])
+for nm,p in [("val",pv),("test",pt)]:
+    assert np.isfinite(p).all() and p.min()>=0 and p.max()<=1, nm
+
+os.makedirs("artifacts", exist_ok=True)
+pd.DataFrame({"Id":val["Id"].values,"Probability":pv}).to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":pt})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+
+lgbm_full.booster_.save_model("artifacts/lgbm_blend.txt")
+import pickle
+pickle.dump({"scaler":scaler_full,"lr":lr_full,"medians":medians,"features":features,"blend_w":best_w},
+            open("artifacts/lr_preproc.pkl","wb"))
+json.dump({"holdout_auc_lgbm":auc_l,"holdout_auc_lr":auc_lr,"blend_holdout_auc":best_auc,
+           "blend_w":float(best_w),"best_iter":int(n_it),"features":features,"medians":medians},
+          open("artifacts/run_meta_blend.json","w"), indent=2)
+with open("artifacts/run_log.txt","a") as f:
+    f.write(f"[BLEND] holdout_lgbm={auc_l:.6f} lr={auc_lr:.6f} blend={best_auc:.6f} w={best_w:.2f}\n")
+print("done rows:", len(val), len(po))
+[2026-10-19 00:10:40,935 coder-round-001-experiment-01 INFO] Execution time: 3.18 seconds; success: True.
+<output>holdout AUC LGBM=0.866830 LR=0.852482 best_iter=98
+blend best_w(LGBM)=0.95 blend_holdout_auc=0.866880
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8693). Best so far: Metric(0.8693).
+
+[2026-10-19 00:10:47,068 coder-round-001-experiment-01 INFO] Code iteration 4: Test whether stronger, well-regularized LightGBM (fewer leaves, lower learning rate, more trees with early stopping, and bagging a few seeds) lifts ROC-AUC over the 0.8693 blend. Single-model complexity tuning plus multi-seed bagging reduces variance and typically improves AUC on imbalanced tabular data. The internal holdout AUC decides; the fixed validation labels are never used for fitting. Both complete outputs written from the final chosen ensemble. Runtime ~200-280s (stays under 300s cell cap).
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    X["ru_clipped"] = X["RevolvingUtilizationOfUnsecuredLines"].clip(0, 1.5)
+    X["ru_gt1_flag"] = (X["RevolvingUtilizationOfUnsecuredLines"] > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    return X
+
+features = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+            'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+            'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+            'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+            'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income']
+
+Xf_full = build(train)[features]; Xte = build(test)[features]; Xval = build(val)[features]
+y = train["SeriousDlqin2yrs"].values
+Xtr, Xho, ytr, yho = train_test_split(Xf_full, y, test_size=0.15, stratify=y, random_state=SEED)
+
+# --- baseline reference: num_leaves=31, lr=0.05 ---
+ref = lgb.LGBMClassifier(objective="binary", num_leaves=31, learning_rate=0.05,
+                         n_estimators=800, subsample=0.9, colsample_bytree=0.9,
+                         random_state=SEED, n_jobs=4, metric="auc", verbose=-1)
+ref.fit(Xtr, ytr, eval_set=[(Xho,yho)], eval_metric="auc",
+        callbacks=[lgb.early_stopping(60, verbose=False), lgb.log_evaluation(0)])
+auc_ref = roc_auc_score(yho, ref.predict_proba(Xho)[:,1])
+print(f"ref(leaves=31,lr=.05) holdout AUC={auc_ref:.6f} iter={ref.best_iteration_}")
+
+# --- candidate: smaller leaves, lower lr, min_child_samples ---
+cand = lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                          n_estimators=1500, min_child_samples=40, subsample=0.9,
+                          subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                          random_state=SEED, n_jobs=4, metric="auc", verbose=-1)
+cand.fit(Xtr, ytr, eval_set=[(Xho,yho)], eval_metric="auc",
+         callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)])
+auc_cand = roc_auc_score(yho, cand.predict_proba(Xho)[:,1])
+print(f"cand(leaves=15,lr=.03,reg) holdout AUC={auc_cand:.6f} iter={cand.best_iteration_}")
+
+# --- multi-seed bag of best config ---
+use_cand = auc_cand >= auc_ref
+leaves = 15 if use_cand else 31
+lr_ = 0.03 if use_cand else 0.05
+n_it = (cand.best_iteration_ if use_cand else ref.best_iteration_) or 200
+n_it = max(60, int(n_it*1.1))
+seeds = [42, 7, 123, 2024]
+def make(sd):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=leaves, learning_rate=lr_,
+                              n_estimators=n_it, min_child_samples=40 if use_cand else 20,
+                              subsample=0.9, subsample_freq=1, colsample_bytree=0.8 if use_cand else 0.9,
+                              reg_lambda=1.0 if use_cand else 0.0,
+                              random_state=sd, n_jobs=4, verbose=-1)
+
+# holdout bag score
+ho_probs = np.zeros(len(Xho))
+for sd in seeds:
+    m = make(sd); m.fit(Xtr, ytr)
+    ho_probs += m.predict_proba(Xho)[:,1]
+ho_probs /= len(seeds)
+auc_bag = roc_auc_score(yho, ho_probs)
+print(f"bag(use_cand={use_cand},n_it={n_it},seeds={seeds}) holdout AUC={auc_bag:.6f}")
+
+# --- refit bag on FULL 120k, predict ---
+val_probs = np.zeros(len(Xval)); test_probs = np.zeros(len(Xte))
+boosters = []
+for sd in seeds:
+    m = make(sd); m.fit(Xf_full, y)
+    val_probs  += m.predict_proba(Xval)[:,1]
+    test_probs += m.predict_proba(Xte)[:,1]
+    boosters.append(m.booster_)
+val_probs /= len(seeds); test_probs /= len(seeds)
+for nm,p in [("val",val_probs),("test",test_probs)]:
+    assert np.isfinite(p).all() and p.min()>=0 and p.max()<=1, nm
+
+os.makedirs("artifacts", exist_ok=True)
+pd.DataFrame({"Id":val["Id"].values,"Probability":val_probs}).to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":test_probs})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+
+for i,b in enumerate(boosters):
+    b.save_model(f"artifacts/lgbm_bag_{seeds[i]}.txt")
+json.dump({"auc_ref":auc_ref,"auc_cand":auc_cand,"auc_bag":auc_bag,"use_cand":use_cand,
+           "n_it":n_it,"leaves":leaves,"lr":lr_,"seeds":seeds,"features":features,"medians":medians},
+          open("artifacts/run_meta_bag.json","w"), indent=2)
+with open("artifacts/run_log.txt","a") as f:
+    f.write(f"[BAG] ref={auc_ref:.6f} cand={auc_cand:.6f} bag={auc_bag:.6f} use_cand={use_cand} n_it={n_it}\n")
+print("done rows:", len(val), len(po))
+[2026-10-19 00:10:55,648 coder-round-001-experiment-01 INFO] Execution time: 7.75 seconds; success: True.
+<output>ref(leaves=31,lr=.05) holdout AUC=0.866830 iter=98
+cand(leaves=15,lr=.03,reg) holdout AUC=0.868483 iter=259
+bag(use_cand=True,n_it=284,seeds=[42, 7, 123, 2024]) holdout AUC=0.868560
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8700). Best so far: Metric(0.8700).
+
+[2026-10-19 00:11:01,869 coder-round-001-experiment-01 INFO] Code iteration 5: Test whether adding a broader set of engineered interactions + a multi-seed bag of the tuned (leaves=15, lr=0.03) config beats the 0.8700 bag. The previous bag used only base+summary features; here I add ratio/interaction signals the trees can't easily construct (delinquency-weighted utilization, log-transformed counts, debt-per-line, agedelinquency flag) and keep the proven bagging scheme. Internal holdout AUC decides; both complete outputs written from the same final ensemble. Runtime ~150-250s (under 300s cap).
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    # --- new engineered signals ---
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    return X
+
+features = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+            'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+            'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+            'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+            'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+            'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+            'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio']
+
+Xf_full = build(train)[features]; Xte = build(test)[features]; Xval = build(val)[features]
+y = train["SeriousDlqin2yrs"].values
+Xtr, Xho, ytr, yho = train_test_split(Xf_full, y, test_size=0.15, stratify=y, random_state=SEED)
+
+def make(sd, n_it):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=sd, n_jobs=4, metric="auc", verbose=-1)
+
+# tune n_estimators on holdout single fit
+probe = make(SEED, 1500)
+probe.fit(Xtr, ytr, eval_set=[(Xho,yho)], eval_metric="auc",
+          callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(0)])
+auc_probe = roc_auc_score(yho, probe.predict_proba(Xho)[:,1])
+n_it = max(120, int((probe.best_iteration_ or 300)*1.1))
+print(f"probe(28 feats) holdout AUC={auc_probe:.6f} iter={probe.best_iteration_} -> n_it={n_it} (prev 0.86856 bag / 0.86848 single)")
+
+seeds = [42, 7, 123, 2024]
+ho = np.zeros(len(Xho))
+for sd in seeds:
+    m = make(sd, n_it); m.fit(Xtr, ytr); ho += m.predict_proba(Xho)[:,1]
+ho /= len(seeds)
+auc_bag = roc_auc_score(yho, ho)
+print(f"bag(28 feats,use_cand) holdout AUC={auc_bag:.6f}")
+
+val_probs = np.zeros(len(Xval)); test_probs = np.zeros(len(Xte))
+boosters = []
+for sd in seeds:
+    m = make(sd, n_it); m.fit(Xf_full, y)
+    val_probs  += m.predict_proba(Xval)[:,1]
+    test_probs += m.predict_proba(Xte)[:,1]
+    boosters.append(m.booster_)
+val_probs /= len(seeds); test_probs /= len(seeds)
+for nm,p in [("val",val_probs),("test",test_probs)]:
+    assert np.isfinite(p).all() and p.min()>=0 and p.max()<=1, nm
+
+os.makedirs("artifacts", exist_ok=True)
+pd.DataFrame({"Id":val["Id"].values,"Probability":val_probs}).to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":test_probs})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+
+for i,b in enumerate(boosters):
+    b.save_model(f"artifacts/lgbm_bag28_{seeds[i]}.txt")
+json.dump({"auc_probe":auc_probe,"auc_bag":auc_bag,"n_it":n_it,"seeds":seeds,
+           "features":features,"medians":medians},
+          open("artifacts/run_meta_bag28.json","w"), indent=2)
+with open("artifacts/run_log.txt","a") as f:
+    f.write(f"[BAG28] probe={auc_probe:.6f} bag={auc_bag:.6f} n_it={n_it}\n")
+print("done rows:", len(val), len(po))
+[2026-10-19 00:11:11,790 coder-round-001-experiment-01 INFO] Execution time: 9.12 seconds; success: True.
+<output>probe(28 feats) holdout AUC=0.868582 iter=337 -> n_it=370 (prev 0.86856 bag / 0.86848 single)
+bag(28 feats,use_cand) holdout AUC=0.868396
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8702). Best so far: Metric(0.8702).
+
+[2026-10-19 00:11:21,928 coder-round-001-experiment-01 INFO] Code iteration 6: The 28-feature bag scored 0.86840 on holdout (slightly below the 0.86856 of the tuned 19-feature bag), yet the fixed-split metric rose to 0.8702  holdout and fixed split drift apart at this margin, so feature richness isn't strictly worse. To make a robust decision, I'll combine both feature sets and both model families via rank-averaging of several strong boosts (19-feat bag, 28-feat bag, and the LR blend), selecting the convex weight on the internal holdout to avoid touching the fixed split. This tests whether a diversified ensemble lowers variance and improves the stable metric. Runtime ~200-260s. Both complete outputs written from the same final ensemble.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from scipy.stats import rankdata
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    return X
+
+feat19 = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+          'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+          'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+          'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+          'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income']
+feat28 = feat19 + ['log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+                   'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio']
+
+full = build(train); te = build(test); va = build(val)
+y = train["SeriousDlqin2yrs"].values
+Xtr_full19, Xtr_full28 = full[feat19], full[feat28]
+Xte19, Xte28 = te[feat19], te[feat28]
+Xva19, Xva28 = va[feat19], va[feat28]
+
+Xtr19, Xho19, ytr, yho = train_test_split(Xtr_full19, y, test_size=0.15, stratify=y, random_state=SEED)
+Xtr28, Xho28, _, _        = train_test_split(Xtr_full28, y, test_size=0.15, stratify=y, random_state=SEED)
+
+def lgbm_make(seed, n_it):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+
+# holdout iter tuning per feature set
+p19 = lgbm_make(SEED,1500); p19.fit(Xtr19,ytr,eval_set=[(Xho19,yho)],eval_metric="auc",
+    callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n19 = max(120,int((p19.best_iteration_ or 300)*1.1))
+p28 = lgbm_make(SEED,1500); p28.fit(Xtr28,ytr,eval_set=[(Xho28,yho)],eval_metric="auc",
+    callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n28 = max(120,int((p28.best_iteration_ or 300)*1.1))
+
+# bag each feature set on holdout
+seeds = [42,7,123,2024]
+ho19 = np.zeros(len(Xho19)); ho28 = np.zeros(len(Xho28))
+for sd in seeds:
+    m=lgbm_make(sd,n19); m.fit(Xtr19,ytr); ho19 += m.predict_proba(Xho19)[:,1]
+    m=lgbm_make(sd,n28); m.fit(Xtr28,ytr); ho28 += m.predict_proba(Xho28)[:,1]
+ho19/=len(seeds); ho28/=len(seeds)
+auc19=roc_auc_score(yho,ho19); auc28=roc_auc_score(yho,ho28)
+
+# LR on 28-feat
+def prep_lr(fit_df, *dss):
+    cols = ["DebtRatio","MonthlyIncome","debt_per_income","income_per_dependent","log_MonthlyIncome","log_DebtRatio"]
+    def tf(df):
+        d = df.copy()
+        for c in ["DebtRatio","MonthlyIncome"]:
+            d[c] = np.log1p(np.clip(d[c], -0.999, None))
+        return d
+    scaler = StandardScaler().fit(tf(fit_df))
+    return scaler, [scaler.transform(tf(ds)) for ds in dss]
+sc_full, (Xtr28_s, Xho28_s) = prep_lr(Xtr28, Xtr28, Xho28)
+lr = LogisticRegression(C=0.5, max_iter=2000, n_jobs=4, random_state=SEED)
+lr.fit(Xtr28_s, ytr); ho_lr = lr.predict_proba(Xho28_s)[:,1]; auc_lr = roc_auc_score(yho,ho_lr)
+
+# grid blend weights on holdout (rank-normalized)
+r19=rankdata(ho19); r28=rankdata(ho28); rlr=rankdata(ho_lr)
+best=(auc19,(1.0,0.0,0.0))
+for w19 in np.linspace(0,1,11):
+    for w28 in np.linspace(0,1-w19,11):
+        wlr = 1-w19-w28
+        a = roc_auc_score(yho, w19*r19+w28*r28+wlr*rlr)
+        if a>best[0]: best=(a,(w19,w28,wlr))
+auc_bl, (w19,w28,wlr) = best
+print(f"holdout: 19bag={auc19:.6f} 28bag={auc28:.6f} lr={auc_lr:.6f} -> blend={auc_bl:.6f} w={best[1]}")
+
+# refit all on full train and predict
+val19=np.zeros(len(Xva19)); val28=np.zeros(len(Xva28)); val_lr_parts=[]
+tst19=np.zeros(len(Xte19)); tst28=np.zeros(len(Xte28))
+for sd in seeds:
+    m=lgbm_make(sd,n19); m.fit(Xtr_full19,y)
+    val19+=m.predict_proba(Xva19)[:,1]; tst19+=m.predict_proba(Xte19)[:,1]
+    m=lgbm_make(sd,n28); m.fit(Xtr_full28,y)
+    val28+=m.predict_proba(Xva28)[:,1]; tst28+=m.predict_proba(Xte28)[:,1]
+val19/=len(seeds); val28/=len(seeds); tst19/=len(seeds); tst28/=len(seeds)
+
+scF, (Xtr28F_s,) = prep_lr(Xtr_full28, Xtr_full28)
+lrF = LogisticRegression(C=0.5, max_iter=2000, n_jobs=4, random_state=SEED); lrF.fit(Xtr28F_s, y)
+val_lr = lrF.predict_proba(scF.transform(np.log1p(np.clip(Xva28[["DebtRatio","MonthlyIncome"]], -0.999, None)).join(
+    Xva28[["debt_per_income","income_per_dependent","log_MonthlyIncome","log_DebtRatio"]]).pipe(lambda d: d.assign(**{
+        "DebtRatio": np.log1p(np.clip(Xva28["DebtRatio"],-0.999,None)),
+        "MonthlyIncome": np.log1p(np.clip(Xva28["MonthlyIncome"],-0.999,None))})[["RevolvingUtilizationOfUnsecuredLines","age","NumberOfTime30-59DaysPastDueNotWorse","DebtRatio","MonthlyIncome","NumberOfOpenCreditLinesAndLoans","NumberOfTimes90DaysLate","NumberRealEstateLoansOrLines","NumberOfTime60-89DaysPastDueNotWorse","NumberOfDependents","MonthlyIncome_missing","NumberOfDependents_missing","delinq_sentinel","ru_clipped","ru_gt1_flag","DebtRatio_is_income","total_delinq","income_per_dependent","debt_per_income","log_MonthlyIncome","log_DebtRatio","delinq_weighted","ru_x_delinq","debt_per_line","income_per_line","has_delinq_any","age_x_delinq","re_loan_ratio"]]))[:,1]
+
+def lr_pred(X28):
+    d = X28.copy()
+    for c in ["DebtRatio","MonthlyIncome"]:
+        d[c] = np.log1p(np.clip(d[c], -0.999, None))
+    return lrF.predict_proba(scF.transform(d))[:,1]
+
+val_lr = lr_pred(Xva28); tst_lr = lr_pred(Xte28)
+
+def blend(p19,p28,plr):
+    r1=rankdata(p19)/len(p19); r2=rankdata(p28)/len(p28); r3=rankdata(plr)/len(plr)
+    s = w19*r1 + w28*r2 + wlr*r3
+    return (s - s.min())/(s.max()-s.min()+1e-12)
+
+val_prob = blend(val19, val28, val_lr)
+tst_prob = blend(tst19, tst28, tst_lr)
+for nm,p in [("val",val_prob),("test",tst_prob)]:
+    assert np.isfinite(p).all() and p.min()>=0 and p.max()<=1, nm
+
+os.makedirs("artifacts", exist_ok=True)
+pd.DataFrame({"Id":val["Id"].values,"Probability":val_prob}).to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tst_prob})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+
+json.dump({"auc19":auc19,"auc28":auc28,"auc_lr":auc_lr,"auc_blend":auc_bl,"weights":[float(w19),float(w28),float(wlr)],
+           "n19":n19,"n28":n28,"seeds":seeds,"feat19":feat19,"feat28":feat28,"medians":medians},
+          open("artifacts/run_meta_diverse.json","w"), indent=2)
+with open("artifacts/run_log.txt","a") as f:
+    f.write(f"[DIVERSE] 19={auc19:.6f} 28={auc28:.6f} lr={auc_lr:.6f} blend={auc_bl:.6f} w={best[1]}\n")
+print("done rows:", len(val), len(po))
+[2026-10-19 00:11:21,975 coder-round-001-experiment-01 INFO] Execution time: 0.04 seconds; success: False.
+<output></output>
+<error>  Cell In[6], line 124
+    val_lr = lrF.predict_proba(scF.transform(np.log1p(np.clip(Xva28[["DebtRatio","MonthlyIncome"]], -0.999, None)).join(
+                              ^
+SyntaxError: '(' was never closed</error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+[2026-10-19 00:11:29,806 coder-round-001-experiment-01 INFO] Code iteration 7: Repair the syntax error (messy inline LR prediction pipeline) by using the clean lr_pred helper, and rerun the diversified 3-way rank-blend (19-feat bag, 28-feat bag, LR) with holdout-selected weights. This tests whether diversified ensembling beats the 0.8702 best. Runtime ~200-260s. Both complete outputs written from the same final ensemble.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from scipy.stats import rankdata
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    return X
+
+feat19 = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+          'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+          'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+          'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+          'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income']
+feat28 = feat19 + ['log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+                   'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio']
+
+full = build(train); te = build(test); va = build(val)
+y = train["SeriousDlqin2yrs"].values
+Xtr_full19, Xtr_full28 = full[feat19], full[feat28]
+Xte19, Xte28 = te[feat19], te[feat28]
+Xva19, Xva28 = va[feat19], va[feat28]
+
+Xtr19, Xho19, ytr, yho = train_test_split(Xtr_full19, y, test_size=0.15, stratify=y, random_state=SEED)
+Xtr28, Xho28, _, _        = train_test_split(Xtr_full28, y, test_size=0.15, stratify=y, random_state=SEED)
+
+def lgbm_make(seed, n_it):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+
+p19 = lgbm_make(SEED,1500); p19.fit(Xtr19,ytr,eval_set=[(Xho19,yho)],eval_metric="auc",
+    callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n19 = max(120,int((p19.best_iteration_ or 300)*1.1))
+p28 = lgbm_make(SEED,1500); p28.fit(Xtr28,ytr,eval_set=[(Xho28,yho)],eval_metric="auc",
+    callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n28 = max(120,int((p28.best_iteration_ or 300)*1.1))
+
+seeds = [42,7,123,2024]
+ho19 = np.zeros(len(Xho19)); ho28 = np.zeros(len(Xho28))
+for sd in seeds:
+    m=lgbm_make(sd,n19); m.fit(Xtr19,ytr); ho19 += m.predict_proba(Xho19)[:,1]
+    m=lgbm_make(sd,n28); m.fit(Xtr28,ytr); ho28 += m.predict_proba(Xho28)[:,1]
+ho19/=len(seeds); ho28/=len(seeds)
+auc19=roc_auc_score(yho,ho19); auc28=roc_auc_score(yho,ho28)
+
+def prep_lr(fit_df, *dss):
+    def tf(df):
+        d = df.copy()
+        for c in ["DebtRatio","MonthlyIncome"]:
+            d[c] = np.log1p(np.clip(d[c], -0.999, None))
+        return d
+    scaler = StandardScaler().fit(tf(fit_df))
+    return scaler, [scaler.transform(tf(ds)) for ds in dss]
+sc_full, (Xtr28_s, Xho28_s) = prep_lr(Xtr28, Xtr28, Xho28)
+lr = LogisticRegression(C=0.5, max_iter=2000, n_jobs=4, random_state=SEED)
+lr.fit(Xtr28_s, ytr); ho_lr = lr.predict_proba(Xho28_s)[:,1]; auc_lr = roc_auc_score(yho,ho_lr)
+
+r19=rankdata(ho19); r28=rankdata(ho28); rlr=rankdata(ho_lr)
+best=(auc19,(1.0,0.0,0.0))
+for w19 in np.linspace(0,1,11):
+    for w28 in np.linspace(0,1-w19,11):
+        wlr = 1-w19-w28
+        a = roc_auc_score(yho, w19*r19+w28*r28+wlr*rlr)
+        if a>best[0]: best=(a,(float(w19),float(w28),float(wlr)))
+auc_bl, (w19,w28,wlr) = best
+print(f"holdout: 19bag={auc19:.6f} 28bag={auc28:.6f} lr={auc_lr:.6f} -> blend={auc_bl:.6f} w={best[1]}")
+
+val19=np.zeros(len(Xva19)); val28=np.zeros(len(Xva28))
+tst19=np.zeros(len(Xte19)); tst28=np.zeros(len(Xte28))
+for sd in seeds:
+    m=lgbm_make(sd,n19); m.fit(Xtr_full19,y)
+    val19+=m.predict_proba(Xva19)[:,1]; tst19+=m.predict_proba(Xte19)[:,1]
+    m=lgbm_make(sd,n28); m.fit(Xtr_full28,y)
+    val28+=m.predict_proba(Xva28)[:,1]; tst28+=m.predict_proba(Xte28)[:,1]
+val19/=len(seeds); val28/=len(seeds); tst19/=len(seeds); tst28/=len(seeds)
+
+scF, (Xtr28F_s,) = prep_lr(Xtr_full28, Xtr_full28)
+lrF = LogisticRegression(C=0.5, max_iter=2000, n_jobs=4, random_state=SEED); lrF.fit(Xtr28F_s, y)
+def lr_pred(X28):
+    d = X28.copy()
+    for c in ["DebtRatio","MonthlyIncome"]:
+        d[c] = np.log1p(np.clip(d[c], -0.999, None))
+    return lrF.predict_proba(scF.transform(d))[:,1]
+val_lr = lr_pred(Xva28); tst_lr = lr_pred(Xte28)
+
+def blend(p19,p28,plr):
+    r1=rankdata(p19)/len(p19); r2=rankdata(p28)/len(p28); r3=rankdata(plr)/len(plr)
+    s = w19*r1 + w28*r2 + wlr*r3
+    return (s - s.min())/(s.max()-s.min()+1e-12)
+
+val_prob = blend(val19, val28, val_lr)
+tst_prob = blend(tst19, tst28, tst_lr)
+for nm,p in [("val",val_prob),("test",tst_prob)]:
+    assert np.isfinite(p).all() and p.min()>=0 and p.max()<=1, nm
+
+os.makedirs("artifacts", exist_ok=True)
+pd.DataFrame({"Id":val["Id"].values,"Probability":val_prob}).to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tst_prob})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+
+json.dump({"auc19":auc19,"auc28":auc28,"auc_lr":auc_lr,"auc_blend":auc_bl,
+           "weights":[w19,w28,wlr],"n19":n19,"n28":n28,"seeds":seeds,
+           "feat19":feat19,"feat28":feat28,"medians":medians},
+          open("artifacts/run_meta_diverse.json","w"), indent=2)
+with open("artifacts/run_log.txt","a") as f:
+    f.write(f"[DIVERSE] 19={auc19:.6f} 28={auc28:.6f} lr={auc_lr:.6f} blend={auc_bl:.6f} w={best[1]}\n")
+print("done rows:", len(val), len(po))
+[2026-10-19 00:11:48,415 coder-round-001-experiment-01 INFO] Execution time: 17.84 seconds; success: True.
+<output>holdout: 19bag=0.868560 28bag=0.868396 lr=0.859761 -> blend=0.868716 w=(0.5, 0.45, 0.04999999999999999)
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8703). Best so far: Metric(0.8703).
+
+[2026-10-19 00:11:55,125 coder-round-001-experiment-01 INFO] Code iteration 8: Holdout is plateauing (~0.8687) and fixed-split crept to 0.8703 with diversification, so the gains are now marginal variance reduction. Test whether a richer, better-regularized feature set improves the base model rather than the blend: add a few orthogonal credit-ratio features and cap the heavy-tail sentinel handling, then run a larger multi-seed bag (6 seeds) of the tuned config. This tests whether more signal + more bag seeds stabilizes the metric. Holdout AUC decides whether to keep; both complete outputs written from the same final ensemble. Runtime ~260-300s  I'll keep seeds at 5 and n_it moderate to stay safe.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    # new orthogonal signals
+    X["income_per_person"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["util_x_dti"] = X["ru_clipped"] * X["DebtRatio"]
+    X["debt_pressure"] = X["DebtRatio"] * X["MonthlyIncome"] / 1e3
+    X["ru_over_lines"] = X["ru_clipped"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["sev_delinq_rate"] = X["NumberOfTimes90DaysLate"] / (X["total_delinq"] + 1.0)
+    return X
+
+feat = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+        'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+        'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+        'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+        'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+        'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+        'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio',
+        'income_per_person','util_x_dti','debt_pressure','ru_over_lines','sev_delinq_rate']
+
+full = build(train)[feat]; te = build(test)[feat]; va = build(val)[feat]
+y = train["SeriousDlqin2yrs"].values
+Xtr, Xho, ytr, yho = train_test_split(full, y, test_size=0.15, stratify=y, random_state=SEED)
+
+def make(seed, n_it):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+probe = make(SEED,1500); probe.fit(Xtr,ytr,eval_set=[(Xho,yho)],eval_metric="auc",
+    callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n_it = max(120,int((probe.best_iteration_ or 300)*1.1))
+auc_probe = roc_auc_score(yho, probe.predict_proba(Xho)[:,1])
+print(f"probe(33 feats) holdout AUC={auc_probe:.6f} iter={probe.best_iteration_} -> n_it={n_it} (prev best blend 0.86872)")
+
+seeds = [42,7,123,2024,555]
+ho = np.zeros(len(Xho))
+for sd in seeds:
+    m=make(sd,n_it); m.fit(Xtr,ytr); ho += m.predict_proba(Xho)[:,1]
+ho/=len(seeds); auc_bag = roc_auc_score(yho,ho)
+print(f"bag5(33 feats) holdout AUC={auc_bag:.6f}")
+
+vp=np.zeros(len(va)); tp=np.zeros(len(te)); bst=[]
+for sd in seeds:
+    m=make(sd,n_it); m.fit(full,y)
+    vp+=m.predict_proba(va)[:,1]; tp+=m.predict_proba(te)[:,1]; bst.append(m.booster_)
+vp/=len(seeds); tp/=len(seeds)
+for nm,p in [("val",vp),("test",tp)]:
+    assert np.isfinite(p).all() and p.min()>=0 and p.max()<=1, nm
+
+os.makedirs("artifacts", exist_ok=True)
+pd.DataFrame({"Id":val["Id"].values,"Probability":vp}).to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tp})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+
+for i,b in enumerate(bst): b.save_model(f"artifacts/lgbm_bag33_{seeds[i]}.txt")
+json.dump({"auc_probe":auc_probe,"auc_bag":auc_bag,"n_it":n_it,"seeds":seeds,"features":feat,"medians":medians},
+          open("artifacts/run_meta_bag33.json","w"), indent=2)
+with open("artifacts/run_log.txt","a") as f:
+    f.write(f"[BAG33] probe={auc_probe:.6f} bag5={auc_bag:.6f} n_it={n_it}\n")
+print("done rows:", len(val), len(po))
+[2026-10-19 00:12:07,180 coder-round-001-experiment-01 INFO] Execution time: 11.25 seconds; success: True.
+<output>probe(33 feats) holdout AUC=0.868041 iter=338 -> n_it=371 (prev best blend 0.86872)
+bag5(33 feats) holdout AUC=0.868245
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8705). Best so far: Metric(0.8705).
+
+[2026-10-19 00:12:56,145 coder-round-002-experiment-01 INFO] Code iteration 1: Test the 8-seed bag hypothesis: refit the champion 33-feature LightGBM config on the full 120k rows with 8 seeds, average positive-class probabilities across seeds for both fixed validation and test, and write both complete outputs. Expected runtime ~2-3 min (8 boosters x ~300 trees x 33 features on 120k rows, CPU n_jobs=4). Output: 30000-row validation_predictions.csv and 101503-row predictions.csv plus artifacts; tests whether wider bagging changes measured fixed-validation ROC-AUC vs champion 0.8705.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+# schema checks
+assert len(train) == 120000 and "SeriousDlqin2yrs" in train.columns
+assert len(test) == 101503 and "Id" in test.columns
+assert len(val) == 30000 and "Id" in val.columns
+assert "SeriousDlqin2yrs" not in test.columns and "SeriousDlqin2yrs" not in val.columns
+print("shapes", train.shape, test.shape, val.shape)
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_person"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["util_x_dti"] = X["ru_clipped"] * X["DebtRatio"]
+    X["debt_pressure"] = X["DebtRatio"] * X["MonthlyIncome"] / 1e3
+    X["ru_over_lines"] = X["ru_clipped"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["sev_delinq_rate"] = X["NumberOfTimes90DaysLate"] / (X["total_delinq"] + 1.0)
+    return X
+
+feat = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+        'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+        'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+        'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+        'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+        'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+        'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio',
+        'income_per_person','util_x_dti','debt_pressure','ru_over_lines','sev_delinq_rate']
+
+full = build(train)[feat]; te = build(test)[feat]; va = build(val)[feat]
+y = train["SeriousDlqin2yrs"].values
+Xtr, Xho, ytr, yho = train_test_split(full, y, test_size=0.15, stratify=y, random_state=SEED)
+
+def make(seed, n_it):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+probe = make(SEED,1500); probe.fit(Xtr,ytr,eval_set=[(Xho,yho)],eval_metric="auc",
+    callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n_it = max(120,int((probe.best_iteration_ or 300)*1.1))
+auc_probe = roc_auc_score(yho, probe.predict_proba(Xho)[:,1])
+print(f"probe(33 feats) holdout AUC={auc_probe:.6f} iter={probe.best_iteration_} -> n_it={n_it}")
+
+seeds = [42,7,123,2024,555,13,99,314]
+ho = np.zeros(len(Xho))
+for sd in seeds:
+    m=make(sd,n_it); m.fit(Xtr,ytr); ho += m.predict_proba(Xho)[:,1]
+ho/=len(seeds); auc_bag = roc_auc_score(yho,ho)
+print(f"bag8(33 feats) holdout AUC={auc_bag:.6f}")
+
+vp=np.zeros(len(va)); tp=np.zeros(len(te)); bst=[]
+for sd in seeds:
+    m=make(sd,n_it); m.fit(full,y)
+    vp+=m.predict_proba(va)[:,1]; tp+=m.predict_proba(te)[:,1]; bst.append(m.booster_)
+vp/=len(seeds); tp/=len(seeds)
+vp=np.clip(vp,0,1); tp=np.clip(tp,0,1)
+for nm,p in [("val",vp),("test",tp)]:
+    assert np.isfinite(p).all() and p.min()>=0 and p.max()<=1, nm
+
+os.makedirs("artifacts", exist_ok=True)
+vout = pd.DataFrame({"Id":val["Id"].values,"Probability":vp})
+vout.to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tp})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+
+# integrity
+assert len(vout)==30000 and vout["Id"].is_unique and set(vout["Id"])==set(val["Id"])
+assert len(po)==101503 and list(po["Id"].values)==list(test["Id"].values)
+
+for i,b in enumerate(bst): b.save_model(f"artifacts/lgbm_bag33_s8_{seeds[i]}.txt")
+json.dump({"auc_probe":auc_probe,"auc_bag":auc_bag,"n_it":n_it,"seeds":seeds,"features":feat,"medians":medians},
+          open("artifacts/run_meta_bag33_s8.json","w"), indent=2)
+with open("artifacts/README.md","w") as f:
+    f.write("Pipeline: build() median-imputes MonthlyIncome/NumberOfDependents (train medians), "
+            "caps delinq sentinels {96,98}->20 with flag, clips RU to [0,1.5], builds 33 features. "
+            f"LightGBM binary num_leaves=15 lr=0.03 subsample=0.9 colsample=0.8 reg_lambda=1.0 min_child_samples=40 n_it={n_it}. "
+            f"8-seed bag {seeds} averaged probs. Inference: apply build() with medians, average predict_proba[:,1].\n")
+print("done rows:", len(vout), len(po))
+[2026-10-19 00:13:15,470 coder-round-002-experiment-01 INFO] Execution time: 18.49 seconds; success: True.
+<output>shapes (120000, 12) (101503, 11) (30000, 11)
+probe(33 feats) holdout AUC=0.868041 iter=338 -> n_it=371
+bag8(33 feats) holdout AUC=0.868178
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8705). Best so far: Metric(0.8705).
+
+[2026-10-19 00:13:23,505 coder-round-002-experiment-01 INFO] Code iteration 2: Hypothesis: adding a small, well-regularized seed-diverse bag of a second model family (regularized logistic regression on a rank/quantile-transformed subset of the same 33 features) blended at a fixed weight with the 8-seed LightGBM ensemble will improve fixed-validation ROC-AUC by diversifying errors, subject to the 0.0005 noise threshold. We keep the current 8-seed LGBM as-is and add an LR branch fit only on the 120k train rows; blend weight chosen on the internal 15% holdout (never the fixed validation). Expected runtime ~60-90s. Writes both complete outputs; tests whether a diverse linear model can lift the ensemble.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import QuantileTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_person"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["util_x_dti"] = X["ru_clipped"] * X["DebtRatio"]
+    X["debt_pressure"] = X["DebtRatio"] * X["MonthlyIncome"] / 1e3
+    X["ru_over_lines"] = X["ru_clipped"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["sev_delinq_rate"] = X["NumberOfTimes90DaysLate"] / (X["total_delinq"] + 1.0)
+    return X
+
+feat = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+        'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+        'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+        'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+        'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+        'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+        'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio',
+        'income_per_person','util_x_dti','debt_pressure','ru_over_lines','sev_delinq_rate']
+
+full = build(train)[feat]; te = build(test)[feat]; va = build(val)[feat]
+y = train["SeriousDlqin2yrs"].values
+Xtr, Xho, ytr, yho = train_test_split(full, y, test_size=0.15, stratify=y, random_state=SEED)
+
+def make(seed, n_it):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+probe = make(SEED,1500); probe.fit(Xtr,ytr,eval_set=[(Xho,yho)],eval_metric="auc",
+    callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n_it = max(120,int((probe.best_iteration_ or 300)*1.1))
+
+seeds = [42,7,123,2024,555,13,99,314]
+
+# --- build LR (rank-transformed) on same train subset, evaluate on internal holdout
+lrp = Pipeline([("qt", QuantileTransformer(n_quantiles=1000, output_distribution="normal", random_state=SEED)),
+                ("lr", LogisticRegression(C=0.5, max_iter=300, class_weight="balanced", n_jobs=4))])
+lrp.fit(Xtr, ytr)
+lr_ho = lrp.predict_proba(Xho)[:,1]
+
+# LGBM holdout bag
+ho_lgb = np.zeros(len(Xho))
+for sd in seeds[:5]:
+    m=make(sd,n_it); m.fit(Xtr,ytr); ho_lgb += m.predict_proba(Xho)[:,1]
+ho_lgb/=5
+auc_lgb = roc_auc_score(yho, ho_lgb)
+auc_lr  = roc_auc_score(yho, lr_ho)
+
+best_w, best_auc = 0.0, auc_lgb
+for w in [0.0,0.05,0.1,0.15,0.2,0.25,0.3]:
+    a = roc_auc_score(yho, (1-w)*ho_lgb + w*lr_ho)
+    if a > best_auc: best_auc, best_w = a, w
+print(f"lgb_holdout={auc_lgb:.6f} lr_holdout={auc_lr:.6f} blend_w={best_w} blend_auc={best_auc:.6f}")
+
+# --- full refit: LGBM 8-seed bag
+vp=np.zeros(len(va)); tp=np.zeros(len(te)); bst=[]
+for sd in seeds:
+    m=make(sd,n_it); m.fit(full,y)
+    vp+=m.predict_proba(va)[:,1]; tp+=m.predict_proba(te)[:,1]; bst.append(m.booster_)
+vp/=len(seeds); tp/=len(seeds)
+
+# --- full refit LR and blend (only if holdout picked w>0)
+lrp_full = Pipeline([("qt", QuantileTransformer(n_quantiles=1000, output_distribution="normal", random_state=SEED)),
+                     ("lr", LogisticRegression(C=0.5, max_iter=300, class_weight="balanced", n_jobs=4))])
+lrp_full.fit(full, y)
+lr_v = lrp_full.predict_proba(va)[:,1]; lr_t = lrp_full.predict_proba(te)[:,1]
+
+if best_w > 0:
+    vp = (1-best_w)*vp + best_w*lr_v
+    tp = (1-best_w)*tp + best_w*lr_t
+vp=np.clip(vp,0,1); tp=np.clip(tp,0,1)
+assert np.isfinite(vp).all() and np.isfinite(tp).all()
+
+os.makedirs("artifacts", exist_ok=True)
+vout = pd.DataFrame({"Id":val["Id"].values,"Probability":vp})
+vout.to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tp})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+assert len(vout)==30000 and vout["Id"].is_unique and set(vout["Id"])==set(val["Id"])
+assert list(po["Id"].values)==list(test["Id"].values)
+
+for i,b in enumerate(bst): b.save_model(f"artifacts/lgbm_bag33_s8_{seeds[i]}.txt")
+import pickle
+pickle.dump(lrp_full, open("artifacts/lr_pipeline.pkl","wb"))
+json.dump({"auc_lgb":auc_lgb,"auc_lr":auc_lr,"best_w":best_w,"blend_auc":best_auc,
+           "n_it":n_it,"seeds":seeds,"features":feat,"medians":medians},
+          open("artifacts/run_meta_blend.json","w"), indent=2)
+with open("artifacts/README.md","w") as f:
+    f.write(f"Pipeline: build() 33 features (median impute from train, sentinel cap, RU clip). "
+            f"LGBM binary num_leaves=15 lr=0.03 subsample=0.9 colsample=0.8 reg_lambda=1.0 "
+            f"min_child_samples=40 n_it={n_it}, 8-seed bag {seeds}. "
+            f"LR branch: QuantileTransformer + LogisticRegression(C=0.5, balanced). "
+            f"Blend weight={best_w} chosen on 15% internal holdout. "
+            f"Apply build() -> average LGBM probs -> blend with LR probs.\n")
+print("done rows:", len(vout), len(po))
+[2026-10-19 00:13:44,717 coder-round-002-experiment-01 INFO] Execution time: 20.47 seconds; success: True.
+<output><PROJECT_ROOT>/.venv/lib/python3.12/site-packages/sklearn/linear_model/_logistic.py:473: ConvergenceWarning: lbfgs failed to converge after 300 iteration(s) (status=1):
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT
+Increase the number of iterations to improve the convergence (max_iter=300).
+You might also want to scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+lgb_holdout=0.868245 lr_holdout=0.859503 blend_w=0.0 blend_auc=0.868245
+<PROJECT_ROOT>/.venv/lib/python3.12/site-packages/sklearn/linear_model/_logistic.py:473: ConvergenceWarning: lbfgs failed to converge after 300 iteration(s) (status=1):
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT
+Increase the number of iterations to improve the convergence (max_iter=300).
+You might also want to scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8705). Best so far: Metric(0.8705).
+
+[2026-10-19 00:13:53,474 coder-round-002-experiment-01 INFO] Code iteration 3: Hypothesis: the champion's 0.8705 is limited by a value-significant regime hard for tree splits; adding an out-of-fold target-encoded "quantile-rank" plus a deeper-lite variant of the same LightGBM (num_leaves=31, min_child_samples=60, colsample=0.7, lr=0.02, more trees) as a second diverse LGBM and blending 50/50 with the current 8-seed bag will add small gains by weaker-correlated models. We pick the deeper config only if it holds internal-holdout AUC  champion bag, and use 50/50 blend evaluated on the same internal holdout; ship only if internal holdout does not regress. Expected runtime ~90-120s. Writes both outputs.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_person"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["util_x_dti"] = X["ru_clipped"] * X["DebtRatio"]
+    X["debt_pressure"] = X["DebtRatio"] * X["MonthlyIncome"] / 1e3
+    X["ru_over_lines"] = X["ru_clipped"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["sev_delinq_rate"] = X["NumberOfTimes90DaysLate"] / (X["total_delinq"] + 1.0)
+    return X
+
+feat = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+        'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+        'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+        'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+        'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+        'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+        'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio',
+        'income_per_person','util_x_dti','debt_pressure','ru_over_lines','sev_delinq_rate']
+
+full = build(train)[feat]; te = build(test)[feat]; va = build(val)[feat]
+y = train["SeriousDlqin2yrs"].values
+Xtr, Xho, ytr, yho = train_test_split(full, y, test_size=0.15, stratify=y, random_state=SEED)
+
+def make_lgb(seed, n_it, num_leaves=15, mcs=40, cs=0.8, lr=0.03):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=num_leaves, learning_rate=lr,
+                              n_estimators=n_it, min_child_samples=mcs, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=cs, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+
+# --- calibrate n_it for champion config
+probe = make_lgb(SEED,1500); probe.fit(Xtr,ytr,eval_set=[(Xho,yho)],eval_metric="auc",
+    callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n_it = max(120,int((probe.best_iteration_ or 300)*1.1))
+
+# --- probe deeper-lite variant
+deep = lgb.LGBMClassifier(objective="binary", num_leaves=31, learning_rate=0.02, n_estimators=1500,
+                          min_child_samples=60, subsample=0.9, subsample_freq=1, colsample_bytree=0.7,
+                          reg_lambda=1.0, random_state=SEED, n_jobs=4, metric="auc", verbose=-1)
+deep.fit(Xtr,ytr,eval_set=[(Xho,yho)],eval_metric="auc",
+         callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n_it_deep = max(150,int((deep.best_iteration_ or 400)*1.1))
+
+seeds = [42,7,123,2024,555,13,99,314]
+
+# champion bag on holdout
+ho_a = np.zeros(len(Xho))
+for sd in seeds[:5]:
+    m=make_lgb(sd,n_it); m.fit(Xtr,ytr); ho_a += m.predict_proba(Xho)[:,1]
+ho_a/=5
+auc_a = roc_auc_score(yho, ho_a)
+
+# deep-lite bag on holdout (4 seeds enough for a probe)
+ho_b = np.zeros(len(Xho)); deep_seeds = [42,7,123,2024]
+for sd in deep_seeds:
+    m = lgb.LGBMClassifier(objective="binary", num_leaves=31, learning_rate=0.02,
+                           n_estimators=n_it_deep, min_child_samples=60, subsample=0.9,
+                           subsample_freq=1, colsample_bytree=0.7, reg_lambda=1.0,
+                           random_state=sd, n_jobs=4, metric="auc", verbose=-1)
+    m.fit(Xtr,ytr); ho_b += m.predict_proba(Xho)[:,1]
+ho_b/=len(deep_seeds)
+auc_b = roc_auc_score(yho, ho_b)
+
+best_w, best_auc = 0.0, auc_a
+for w in [0.0,0.2,0.3,0.4,0.5,0.6]:
+    a = roc_auc_score(yho, (1-w)*ho_a + w*ho_b)
+    if a > best_auc: best_auc, best_w = a, w
+print(f"champ_holdout={auc_a:.6f} deep_holdout={auc_b:.6f} blend_w={best_w} blend_auc={best_auc:.6f} n_it={n_it} n_it_deep={n_it_deep}")
+
+# --- full refit
+vp=np.zeros(len(va)); tp=np.zeros(len(te))
+for sd in seeds:
+    m=make_lgb(sd,n_it); m.fit(full,y)
+    vp+=m.predict_proba(va)[:,1]; tp+=m.predict_proba(te)[:,1]
+vp/=len(seeds); tp/=len(seeds)
+
+if best_w > 0:
+    vp_d=np.zeros(len(va)); tp_d=np.zeros(len(te))
+    for sd in deep_seeds:
+        m = lgb.LGBMClassifier(objective="binary", num_leaves=31, learning_rate=0.02,
+                               n_estimators=n_it_deep, min_child_samples=60, subsample=0.9,
+                               subsample_freq=1, colsample_bytree=0.7, reg_lambda=1.0,
+                               random_state=sd, n_jobs=4, metric="auc", verbose=-1)
+        m.fit(full,y)
+        vp_d+=m.predict_proba(va)[:,1]; tp_d+=m.predict_proba(te)[:,1]
+    vp_d/=len(deep_seeds); tp_d/=len(deep_seeds)
+    vp = (1-best_w)*vp + best_w*vp_d
+    tp = (1-best_w)*tp + best_w*tp_d
+
+vp=np.clip(vp,0,1); tp=np.clip(tp,0,1)
+assert np.isfinite(vp).all() and np.isfinite(tp).all()
+
+os.makedirs("artifacts", exist_ok=True)
+vout = pd.DataFrame({"Id":val["Id"].values,"Probability":vp})
+vout.to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tp})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+assert len(vout)==30000 and vout["Id"].is_unique and set(vout["Id"])==set(val["Id"])
+assert list(po["Id"].values)==list(test["Id"].values)
+
+json.dump({"auc_champ":auc_a,"auc_deep":auc_b,"best_w":best_w,"blend_auc":best_auc,
+           "n_it":n_it,"n_it_deep":n_it_deep,"seeds":seeds,"deep_seeds":deep_seeds,
+           "features":feat,"medians":medians},
+          open("artifacts/run_meta_deeplite.json","w"), indent=2)
+with open("artifacts/README.md","w") as f:
+    f.write(f"Pipeline: build() 33 features. Champion LGBM (num_leaves=15 lr=0.03 n_it={n_it}) 8-seed bag {seeds}. "
+            f"Deep-lite LGBM (num_leaves=31 lr=0.02 n_it={n_it_deep}) 4-seed bag {deep_seeds}. "
+            f"Blend weight={best_w} chosen on 15% internal holdout. Weights: {1-best_w:.4f} champ + {best_w:.4f} deep.\n")
+print("done rows:", len(vout), len(po))
+[2026-10-19 00:14:15,786 coder-round-002-experiment-01 INFO] Execution time: 21.44 seconds; success: True.
+<output>champ_holdout=0.868245 deep_holdout=0.867860 blend_w=0.0 blend_auc=0.868245 n_it=371 n_it_deep=292
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8705). Best so far: Metric(0.8705).
+
+[2026-10-19 00:14:22,704 coder-round-002-experiment-01 INFO] Code iteration 4: Hypothesis: the champion is capped by GBDT's handling of the extreme long tail of DebtRatio/MonthlyIncome ratio features; a distribution-based target-free transform (signed log1p on extreme-valued ratios like DebtRatio, debt_pressure, income_per_* with large scale) may let trees spend splits more usefully. Test the narrow change: add 3 tail-compressed features (signed log of DebtRatio, MonthlyIncome, ru_x_delinq) to the champion 33  36 features and measure internal holdout bag AUC vs champion. Ship only if holdout does not regress; else fall back to champion (no blend). Expected runtime ~40-60s. Writes both complete outputs.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def slog(x):
+    x = np.asarray(x, dtype=float)
+    return np.sign(x) * np.log1p(np.abs(x))
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_person"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["util_x_dti"] = X["ru_clipped"] * X["DebtRatio"]
+    X["debt_pressure"] = X["DebtRatio"] * X["MonthlyIncome"] / 1e3
+    X["ru_over_lines"] = X["ru_clipped"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["sev_delinq_rate"] = X["NumberOfTimes90DaysLate"] / (X["total_delinq"] + 1.0)
+    # tail-compressed
+    X["slog_DebtRatio"] = slog(X["DebtRatio"])
+    X["slog_debt_per_income"] = slog(X["debt_per_income"])
+    X["slog_debt_pressure"] = slog(X["debt_pressure"])
+    return X
+
+champ_feat = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+        'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+        'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+        'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+        'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+        'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+        'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio',
+        'income_per_person','util_x_dti','debt_pressure','ru_over_lines','sev_delinq_rate']
+new_feat = champ_feat + ["slog_DebtRatio","slog_debt_per_income","slog_debt_pressure"]
+
+b_full = build(train); b_te = build(test); b_va = build(val)
+full = b_full[new_feat]; te = b_te[new_feat]; va = b_va[new_feat]
+y = train["SeriousDlqin2yrs"].values
+Xtr, Xho, ytr, yho = train_test_split(full, y, test_size=0.15, stratify=y, random_state=SEED)
+
+def make(seed, n_it):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+probe = make(SEED,1500); probe.fit(Xtr,ytr,eval_set=[(Xho,yho)],eval_metric="auc",
+    callbacks=[lgb.early_stopping(100,verbose=False), lgb.log_evaluation(0)])
+n_it = max(120,int((probe.best_iteration_ or 300)*1.1))
+
+seeds = [42,7,123,2024,555]
+ho = np.zeros(len(Xho))
+for sd in seeds:
+    m=make(sd,n_it); m.fit(Xtr,ytr); ho += m.predict_proba(Xho)[:,1]
+ho/=len(seeds)
+auc_new = roc_auc_score(yho,ho)
+print(f"36-feat bag holdout AUC={auc_new:.6f} n_it={n_it} (champ bag = 0.868245)")
+
+seeds8 = [42,7,123,2024,555,13,99,314]
+vp=np.zeros(len(va)); tp=np.zeros(len(te))
+for sd in seeds8:
+    m=make(sd,n_it); m.fit(full,y)
+    vp+=m.predict_proba(va)[:,1]; tp+=m.predict_proba(te)[:,1]
+vp/=len(seeds8); tp/=len(seeds8)
+vp=np.clip(vp,0,1); tp=np.clip(tp,0,1)
+assert np.isfinite(vp).all() and np.isfinite(tp).all()
+
+os.makedirs("artifacts", exist_ok=True)
+vout = pd.DataFrame({"Id":val["Id"].values,"Probability":vp})
+vout.to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tp})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+assert len(vout)==30000 and vout["Id"].is_unique and set(vout["Id"])==set(val["Id"])
+assert list(po["Id"].values)==list(test["Id"].values)
+
+json.dump({"auc_new_holdout":auc_new,"champ_holdout":0.868245,"n_it":n_it,"seeds":seeds8,
+           "features":new_feat,"medians":medians},
+          open("artifacts/run_meta_slog36.json","w"), indent=2)
+with open("artifacts/README.md","w") as f:
+    f.write(f"Pipeline: build() 36 features (champion 33 + signed-log of DebtRatio/debt_per_income/debt_pressure). "
+            f"LGBM num_leaves=15 lr=0.03 n_it={n_it}, 8-seed bag {seeds8}. "
+            f"Holdout AUC={auc_new:.6f} vs champ 0.868245.\n")
+print("done rows:", len(vout), len(po))
+[2026-10-19 00:14:33,850 coder-round-002-experiment-01 INFO] Execution time: 10.28 seconds; success: True.
+<output>36-feat bag holdout AUC=0.868340 n_it=202 (champ bag = 0.868245)
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8704). Best so far: Metric(0.8705).
+
+[2026-10-19 00:14:39,907 coder-round-002-experiment-01 INFO] Code iteration 5: Hypothesis: measured fixed-valid churn (0.8704 vs champion 0.8705) despite higher internal holdout (0.86834 vs 0.86818) reflects overfitting to the 15% holdout and adds noise. Revert to the exact champion config (33 features, no slog) since it measured best on the fixed validation, and stabilize it by widening the seed bag to 12 seeds and lengthening training slightly. n_it for the champion is ~371; using 400 fixed removes the varying-early-stopping noise seen in earlier cells. Expected runtime ~30-40s. Writes both complete outputs; verify measured fixed-validation ROC-AUC holds at 0.8705.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_person"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["util_x_dti"] = X["ru_clipped"] * X["DebtRatio"]
+    X["debt_pressure"] = X["DebtRatio"] * X["MonthlyIncome"] / 1e3
+    X["ru_over_lines"] = X["ru_clipped"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["sev_delinq_rate"] = X["NumberOfTimes90DaysLate"] / (X["total_delinq"] + 1.0)
+    return X
+
+feat = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+        'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+        'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+        'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+        'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+        'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+        'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio',
+        'income_per_person','util_x_dti','debt_pressure','ru_over_lines','sev_delinq_rate']
+
+full = build(train)[feat]; te = build(test)[feat]; va = build(val)[feat]
+y = train["SeriousDlqin2yrs"].values
+
+# fixed n_it from champion provenance; no holdout re-derivation to avoid drift
+n_it = 371
+
+def make(seed, n_it):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+
+seeds = [42,7,123,2024,555,13,99,314,101,777,222,999]
+vp=np.zeros(len(va)); tp=np.zeros(len(te))
+for sd in seeds:
+    m=make(sd,n_it); m.fit(full,y)
+    vp+=m.predict_proba(va)[:,1]; tp+=m.predict_proba(te)[:,1]
+vp/=len(seeds); tp/=len(seeds)
+vp=np.clip(vp,0,1); tp=np.clip(tp,0,1)
+assert np.isfinite(vp).all() and np.isfinite(tp).all()
+
+os.makedirs("artifacts", exist_ok=True)
+vout = pd.DataFrame({"Id":val["Id"].values,"Probability":vp})
+vout.to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tp})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+assert len(vout)==30000 and vout["Id"].is_unique and set(vout["Id"])==set(val["Id"])
+assert list(po["Id"].values)==list(test["Id"].values)
+
+json.dump({"n_it":n_it,"seeds":seeds,"features":feat,"medians":medians},
+          open("artifacts/run_meta_bag33_s12.json","w"), indent=2)
+with open("artifacts/README.md","w") as f:
+    f.write(f"Champion config: build() 33 features (median impute train, delinq sentinel cap, RU clip). "
+            f"LGBM num_leaves=15 lr=0.03 n_it={n_it} subsample=0.9 colsample=0.8 reg_lambda=1.0 "
+            f"min_child_samples=40. 12-seed bag {seeds} averaged predict_proba[:,1]. "
+            f"Inference: apply build(), average LGBM probabilities.\n")
+print("done rows:", len(vout), len(po))
+[2026-10-19 00:14:56,493 coder-round-002-experiment-01 INFO] Execution time: 15.70 seconds; success: True.
+<output>done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8706). Best so far: Metric(0.8706).
+
+[2026-10-19 00:15:01,949 coder-round-002-experiment-01 INFO] Code iteration 6: Hypothesis: the 12-seed bag at n_it=371 hit 0.8706 (new best). Widening the bag further (24 seeds) and averaging reduces bagging variance further; since each fit is fast (~1s on 120k rows), 24 seeds is cheap and likely stabilizes near a marginally higher AUC. Keep exact champion config (33 features, hyperparams, n_it=371) so only bag width changes. Expected runtime ~30-40s. Writes both complete outputs; verifies new measured fixed-validation ROC-AUC  0.8706.
+import os, json, numpy as np, pandas as pd
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_person"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["util_x_dti"] = X["ru_clipped"] * X["DebtRatio"]
+    X["debt_pressure"] = X["DebtRatio"] * X["MonthlyIncome"] / 1e3
+    X["ru_over_lines"] = X["ru_clipped"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["sev_delinq_rate"] = X["NumberOfTimes90DaysLate"] / (X["total_delinq"] + 1.0)
+    return X
+
+feat = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+        'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+        'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+        'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+        'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+        'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+        'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio',
+        'income_per_person','util_x_dti','debt_pressure','ru_over_lines','sev_delinq_rate']
+
+full = build(train)[feat]; te = build(test)[feat]; va = build(val)[feat]
+y = train["SeriousDlqin2yrs"].values
+n_it = 371
+
+def make(seed, n_it):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+
+seeds = [42,7,123,2024,555,13,99,314,101,777,222,999,1,2,3,11,17,23,29,37,41,53,67,79]
+vp=np.zeros(len(va)); tp=np.zeros(len(te))
+for sd in seeds:
+    m=make(sd,n_it); m.fit(full,y)
+    vp+=m.predict_proba(va)[:,1]; tp+=m.predict_proba(te)[:,1]
+vp/=len(seeds); tp/=len(seeds)
+vp=np.clip(vp,0,1); tp=np.clip(tp,0,1)
+assert np.isfinite(vp).all() and np.isfinite(tp).all()
+
+os.makedirs("artifacts", exist_ok=True)
+vout = pd.DataFrame({"Id":val["Id"].values,"Probability":vp})
+vout.to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tp})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+assert len(vout)==30000 and vout["Id"].is_unique and set(vout["Id"])==set(val["Id"])
+assert list(po["Id"].values)==list(test["Id"].values)
+
+json.dump({"n_it":n_it,"seeds":seeds,"features":feat,"medians":medians},
+          open("artifacts/run_meta_bag33_s24.json","w"), indent=2)
+with open("artifacts/README.md","w") as f:
+    f.write(f"Champion config: build() 33 features (train medians impute, delinq sentinel cap, RU clip). "
+            f"LGBM num_leaves=15 lr=0.03 n_it={n_it} subsample=0.9 colsample=0.8 reg_lambda=1.0 "
+            f"min_child_samples=40. {len(seeds)}-seed bag {seeds} averaged predict_proba[:,1].\n")
+print("done rows:", len(vout), len(po))
+[2026-10-19 00:15:32,453 coder-round-002-experiment-01 INFO] Execution time: 29.70 seconds; success: True.
+<output>done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8706). Best so far: Metric(0.8706).
+
+[2026-10-19 00:15:40,750 coder-round-002-experiment-01 INFO] Code iteration 7: Hypothesis: 24-seed bag holds 0.8706  bag width has saturated. The remaining headroom is model diversity within the tree family: add a second LGBM variant using different feature subsampling (colsample=0.6) and a different split structure (num_leaves=8, lr=0.05, n_it=200) as a diverse bag, then apply a small rank-average blend (weight chosen by internal-holdout 5-fold-ish check). Only ship blend if internal holdout clearly exceeds champion bag. Expected runtime ~50-60s. Writes both outputs; tests whether tree-diversity blending beats the pure champion config.
+import os, json, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_person"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["util_x_dti"] = X["ru_clipped"] * X["DebtRatio"]
+    X["debt_pressure"] = X["DebtRatio"] * X["MonthlyIncome"] / 1e3
+    X["ru_over_lines"] = X["ru_clipped"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["sev_delinq_rate"] = X["NumberOfTimes90DaysLate"] / (X["total_delinq"] + 1.0)
+    return X
+
+feat = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+        'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+        'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+        'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+        'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+        'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+        'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio',
+        'income_per_person','util_x_dti','debt_pressure','ru_over_lines','sev_delinq_rate']
+
+full = build(train)[feat]; te = build(test)[feat]; va = build(val)[feat]
+y = train["SeriousDlqin2yrs"].values
+Xtr, Xho, ytr, yho = train_test_split(full, y, test_size=0.2, stratify=y, random_state=SEED)
+# NOTE: fit stats already on full train (medians are fold-independent constants here);
+# 0.2 holdout is only for blend weight selection.
+
+n_it_a = 371
+def makeA(seed):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=15, learning_rate=0.03,
+                              n_estimators=n_it_a, min_child_samples=40, subsample=0.9,
+                              subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+def makeB(seed):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=8, learning_rate=0.05,
+                              n_estimators=200, min_child_samples=25, subsample=0.85,
+                              subsample_freq=1, colsample_bytree=0.6, reg_lambda=0.5,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+
+seedsA = [42,7,123,2024,555]
+seedsB = [42,7,123,2024,555]
+
+hoA=np.zeros(len(Xho)); hoB=np.zeros(len(Xho))
+for sd in seedsA:
+    m=makeA(sd); m.fit(Xtr,ytr); hoA+=m.predict_proba(Xho)[:,1]
+for sd in seedsB:
+    m=makeB(sd); m.fit(Xtr,ytr); hoB+=m.predict_proba(Xho)[:,1]
+hoA/=len(seedsA); hoB/=len(seedsB)
+aucA=roc_auc_score(yho,hoA); aucB=roc_auc_score(yho,hoB)
+print(f"holdout A(15-leaf)={aucA:.6f}  B(8-leaf)={aucB:.6f}")
+
+# blend search on holdout
+from scipy.stats import rankdata
+hoA_r = rankdata(hoA)/len(hoA); hoB_r = rankdata(hoB)/len(hoB)
+best_w, best_auc = 0.0, aucA
+for w in [0.0,0.1,0.2,0.3,0.4,0.5]:
+    a_prob = roc_auc_score(yho, (1-w)*hoA + w*hoB)
+    a_rank = roc_auc_score(yho, (1-w)*hoA_r + w*hoB_r)
+    if a_prob > best_auc: best_auc, best_w = a_prob, w
+print(f"best prob-blend w={best_w} auc={best_auc:.6f} (delta vs A = {best_auc-aucA:+.6f})")
+
+use_blend = (best_auc - aucA) > 0.0003
+print("use_blend:", use_blend)
+
+# Full refit
+seeds_full_A = [42,7,123,2024,555,13,99,314,101,777,222,999]
+vpA=np.zeros(len(va)); tpA=np.zeros(len(te))
+for sd in seeds_full_A:
+    m=makeA(sd); m.fit(full,y)
+    vpA+=m.predict_proba(va)[:,1]; tpA+=m.predict_proba(te)[:,1]
+vpA/=len(seeds_full_A); tpA/=len(seeds_full_A)
+
+if use_blend and best_w>0:
+    vpB=np.zeros(len(va)); tpB=np.zeros(len(te))
+    for sd in seedsB:
+        m=makeB(sd); m.fit(full,y)
+        vpB+=m.predict_proba(va)[:,1]; tpB+=m.predict_proba(te)[:,1]
+    vpB/=len(seedsB); tpB/=len(seedsB)
+    vp = (1-best_w)*vpA + best_w*vpB
+    tp = (1-best_w)*tpA + best_w*tpB
+else:
+    vp, tp = vpA, tpA
+
+vp=np.clip(vp,0,1); tp=np.clip(tp,0,1)
+assert np.isfinite(vp).all() and np.isfinite(tp).all()
+
+os.makedirs("artifacts", exist_ok=True)
+vout = pd.DataFrame({"Id":val["Id"].values,"Probability":vp})
+vout.to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tp})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+assert len(vout)==30000 and vout["Id"].is_unique and set(vout["Id"])==set(val["Id"])
+assert list(po["Id"].values)==list(test["Id"].values)
+
+json.dump({"aucA":aucA,"aucB":aucB,"blend_w":best_w,"blend_auc":best_auc,"use_blend":bool(use_blend),
+           "n_it_a":n_it_a,"seedsA":seedsA,"seedsB":seedsB,"seeds_full_A":seeds_full_A,
+           "features":feat,"medians":medians},
+          open("artifacts/run_meta_bagAB.json","w"), indent=2)
+with open("artifacts/README.md","w") as f:
+    f.write(f"build() 33 features. Champion A: LGBM num_leaves=15 lr=0.03 n_it={n_it_a} "
+            f"colsample=0.8 mcs=40 reg_lambda=1.0, 12-seed bag. "
+            f"Diverse B: LGBM num_leaves=8 lr=0.05 n_it=200 colsample=0.6 mcs=25 lam=0.5, 5-seed bag. "
+            f"Blend w_B={best_w} prob-average on holdout A={aucA:.6f} B={aucB:.6f}. use_blend={bool(use_blend)}.\n")
+print("done rows:", len(vout), len(po))
+[2026-10-19 00:16:03,078 coder-round-002-experiment-01 INFO] Execution time: 21.37 seconds; success: True.
+<output>holdout A(15-leaf)=0.870310  B(8-leaf)=0.870463
+best prob-blend w=0.5 auc=0.870526 (delta vs A = +0.000216)
+use_blend: False
+done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8706). Best so far: Metric(0.8706).
+
+[2026-10-19 00:16:08,411 coder-round-002-experiment-01 INFO] Code iteration 8: Hypothesis: variant B (num_leaves=8, lr=0.05, n_it=200, colsample=0.6, mcs=25, lam=0.5) actually beat A on the internal holdout (0.870463 vs 0.870310) and blending gave +0.000216, which is edge-of-noise. Test whether B alone (as its own multi-seed bag) generalizes better on the fixed validation than the champion A. Widen B to 12 seeds for stability and use it as the sole model. If fixed validation improves we keep B; if it regresses, champion A remains best. Expected runtime ~25-35s. Writes both complete outputs.
+import os, json, numpy as np, pandas as pd
+import lightgbm as lgb
+
+SEED = 42
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+BASE = "../input/data"
+train = pd.read_csv(f"{BASE}/train_data/train.csv")
+test  = pd.read_csv(f"{BASE}/predict_data/test.csv")
+val   = pd.read_csv(f"{BASE}/validation_data/validation_features.csv")
+
+delinq = ["NumberOfTime30-59DaysPastDueNotWorse","NumberOfTimes90DaysLate","NumberOfTime60-89DaysPastDueNotWorse"]
+impute_cols = ["MonthlyIncome","NumberOfDependents"]
+medians = {c: float(train[c].median()) for c in impute_cols}
+
+def build(df):
+    X = df.copy()
+    X["MonthlyIncome_missing"] = X["MonthlyIncome"].isna().astype(int)
+    X["NumberOfDependents_missing"] = X["NumberOfDependents"].isna().astype(int)
+    X["delinq_sentinel"] = X[delinq].isin([96,98]).any(axis=1).astype(int)
+    for c in delinq:
+        X[c] = X[c].where(~X[c].isin([96,98]), 20)
+    ru = X["RevolvingUtilizationOfUnsecuredLines"]
+    X["ru_clipped"] = ru.clip(0, 1.5)
+    X["ru_gt1_flag"] = (ru > 1).astype(int)
+    X["DebtRatio_is_income"] = (X["DebtRatio"] > 10).astype(int)
+    for c, m in medians.items():
+        X[c] = X[c].fillna(m)
+    X["total_delinq"] = X[delinq[0]] + X[delinq[1]] + X[delinq[2]]
+    X["income_per_dependent"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["debt_per_income"] = X["DebtRatio"] / (X["MonthlyIncome"] + 1.0)
+    X["log_MonthlyIncome"] = np.log1p(X["MonthlyIncome"].clip(lower=0))
+    X["log_DebtRatio"] = np.log1p(X["DebtRatio"].clip(lower=0))
+    X["delinq_weighted"] = (X[delinq[1]]*3 + X[delinq[2]]*2 + X[delinq[0]])
+    X["ru_x_delinq"] = X["ru_clipped"] * (1 + X["total_delinq"])
+    X["debt_per_line"] = X["DebtRatio"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_line"] = X["MonthlyIncome"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["has_delinq_any"] = (X["total_delinq"] > 0).astype(int)
+    X["age_x_delinq"] = X["age"] * (1 + X["has_delinq_any"])
+    X["re_loan_ratio"] = X["NumberRealEstateLoansOrLines"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["income_per_person"] = X["MonthlyIncome"] / (X["NumberOfDependents"] + 1.0)
+    X["util_x_dti"] = X["ru_clipped"] * X["DebtRatio"]
+    X["debt_pressure"] = X["DebtRatio"] * X["MonthlyIncome"] / 1e3
+    X["ru_over_lines"] = X["ru_clipped"] / (X["NumberOfOpenCreditLinesAndLoans"] + 1.0)
+    X["sev_delinq_rate"] = X["NumberOfTimes90DaysLate"] / (X["total_delinq"] + 1.0)
+    return X
+
+feat = ['RevolvingUtilizationOfUnsecuredLines','age','NumberOfTime30-59DaysPastDueNotWorse',
+        'DebtRatio','MonthlyIncome','NumberOfOpenCreditLinesAndLoans','NumberOfTimes90DaysLate',
+        'NumberRealEstateLoansOrLines','NumberOfTime60-89DaysPastDueNotWorse','NumberOfDependents',
+        'MonthlyIncome_missing','NumberOfDependents_missing','delinq_sentinel','ru_clipped','ru_gt1_flag',
+        'DebtRatio_is_income','total_delinq','income_per_dependent','debt_per_income',
+        'log_MonthlyIncome','log_DebtRatio','delinq_weighted','ru_x_delinq','debt_per_line',
+        'income_per_line','has_delinq_any','age_x_delinq','re_loan_ratio',
+        'income_per_person','util_x_dti','debt_pressure','ru_over_lines','sev_delinq_rate']
+
+full = build(train)[feat]; te = build(test)[feat]; va = build(val)[feat]
+y = train["SeriousDlqin2yrs"].values
+
+def makeB(seed):
+    return lgb.LGBMClassifier(objective="binary", num_leaves=8, learning_rate=0.05,
+                              n_estimators=200, min_child_samples=25, subsample=0.85,
+                              subsample_freq=1, colsample_bytree=0.6, reg_lambda=0.5,
+                              random_state=seed, n_jobs=4, metric="auc", verbose=-1)
+
+seedsB = [42,7,123,2024,555,13,99,314,101,777,222,999]
+vp=np.zeros(len(va)); tp=np.zeros(len(te))
+for sd in seedsB:
+    m=makeB(sd); m.fit(full,y)
+    vp+=m.predict_proba(va)[:,1]; tp+=m.predict_proba(te)[:,1]
+vp/=len(seedsB); tp/=len(seedsB)
+vp=np.clip(vp,0,1); tp=np.clip(tp,0,1)
+assert np.isfinite(vp).all() and np.isfinite(tp).all()
+
+os.makedirs("artifacts", exist_ok=True)
+vout = pd.DataFrame({"Id":val["Id"].values,"Probability":vp})
+vout.to_csv("validation_predictions.csv", index=False)
+po = pd.DataFrame({"Id":test["Id"].values,"Probability":tp})
+assert len(po)==101503 and list(po.columns)==["Id","Probability"] and po["Id"].is_unique
+po.to_csv("predictions.csv", index=False)
+assert len(vout)==30000 and vout["Id"].is_unique and set(vout["Id"])==set(val["Id"])
+assert list(po["Id"].values)==list(test["Id"].values)
+
+json.dump({"variant":"B","seeds":seedsB,"features":feat,"medians":medians},
+          open("artifacts/run_meta_bagB.json","w"), indent=2)
+with open("artifacts/README.md","w") as f:
+    f.write(f"Variant B: LGBM num_leaves=8 lr=0.05 n_it=200 mcs=25 subsample=0.85 colsample=0.6 "
+            f"reg_lambda=0.5, 12-seed bag. build() 33 features. Apply build(), average predict_proba[:,1].\n")
+print("done rows:", len(vout), len(po))
+[2026-10-19 00:16:16,750 coder-round-002-experiment-01 INFO] Execution time: 7.54 seconds; success: True.
+<output>done rows: 30000 101503</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8706). Best so far: Metric(0.8706).
+

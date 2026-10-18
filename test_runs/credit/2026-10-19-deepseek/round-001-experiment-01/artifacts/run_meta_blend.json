@@ -1,0 +1,32 @@
+{
+  "holdout_auc_lgbm": 0.8668302651321529,
+  "holdout_auc_lr": 0.8524821927440136,
+  "blend_holdout_auc": 0.8668798771660478,
+  "blend_w": 0.9500000000000001,
+  "best_iter": 98,
+  "features": [
+    "RevolvingUtilizationOfUnsecuredLines",
+    "age",
+    "NumberOfTime30-59DaysPastDueNotWorse",
+    "DebtRatio",
+    "MonthlyIncome",
+    "NumberOfOpenCreditLinesAndLoans",
+    "NumberOfTimes90DaysLate",
+    "NumberRealEstateLoansOrLines",
+    "NumberOfTime60-89DaysPastDueNotWorse",
+    "NumberOfDependents",
+    "MonthlyIncome_missing",
+    "NumberOfDependents_missing",
+    "delinq_sentinel",
+    "ru_clipped",
+    "ru_gt1_flag",
+    "DebtRatio_is_income",
+    "total_delinq",
+    "income_per_dependent",
+    "debt_per_income"
+  ],
+  "medians": {
+    "MonthlyIncome": 5390.0,
+    "NumberOfDependents": 0.0
+  }
+}

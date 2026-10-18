@@ -1,9 +1,25 @@
 workspace/
 datasets/
-data/
+data/*
+!data/README.md
+!data/titanic/
+data/titanic/*
+!data/titanic/train.csv
+!data/titanic/test.csv
+!data/titanic/gender_submission.csv
+!data/titanic/sources.json
+!data/give_me_some_credit/
+data/give_me_some_credit/*
+!data/give_me_some_credit/train.csv
+!data/give_me_some_credit/test.csv
+!data/give_me_some_credit/sampleEntry.csv
+!data/give_me_some_credit/Data Dictionary.xls
+!data/give_me_some_credit/sources.json
+!data/give_me_some_credit/prepared_data.json
 *.egg-info
 __pycache__
 .pytest_cache
+tests/
 .vscode
 datasets.tar.xz
 CO-Bench

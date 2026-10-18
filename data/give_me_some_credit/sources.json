@@ -1,0 +1,24 @@
+{
+  "dataset_url": "https://www.kaggle.com/datasets/brycecf/give-me-some-credit-dataset",
+  "original_competition_url": "https://www.kaggle.com/c/GiveMeSomeCredit",
+  "download_url": "https://www.kaggle.com/api/v1/datasets/download/brycecf/give-me-some-credit-dataset",
+  "downloaded_at_utc": "2026-10-18T16:04:07.347998+00:00",
+  "files": {
+    "Data Dictionary.xls": {
+      "bytes": 14848,
+      "sha256": "8e32190d0403bc9ffb181f56e6bff0b8dfda75d16a5539fbfefde9c706d40494"
+    },
+    "cs-test.csv": {
+      "bytes": 4983329,
+      "sha256": "bab363a2a807218d32a51f5fc9668b8be7977795065edd386abc8546abaa5b78"
+    },
+    "cs-training.csv": {
+      "bytes": 7564965,
+      "sha256": "1bd46da486a5708c58c7b01a034fae2a13b327f6f7b62ea7ba4fe3b5824b24ac"
+    },
+    "sampleEntry.csv": {
+      "bytes": 1907226,
+      "sha256": "578b4b01d0f6ed7f97f1988afff0c41194e72bf4b25707119903d4de3dc1dcea"
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "auc_ref": 0.8668302651321529,
+  "auc_cand": 0.8684826304186548,
+  "auc_bag": 0.8685595105130746,
+  "use_cand": true,
+  "n_it": 284,
+  "leaves": 15,
+  "lr": 0.03,
+  "seeds": [
+    42,
+    7,
+    123,
+    2024
+  ],
+  "features": [
+    "RevolvingUtilizationOfUnsecuredLines",
+    "age",
+    "NumberOfTime30-59DaysPastDueNotWorse",
+    "DebtRatio",
+    "MonthlyIncome",
+    "NumberOfOpenCreditLinesAndLoans",
+    "NumberOfTimes90DaysLate",
+    "NumberRealEstateLoansOrLines",
+    "NumberOfTime60-89DaysPastDueNotWorse",
+    "NumberOfDependents",
+    "MonthlyIncome_missing",
+    "NumberOfDependents_missing",
+    "delinq_sentinel",
+    "ru_clipped",
+    "ru_gt1_flag",
+    "DebtRatio_is_income",
+    "total_delinq",
+    "income_per_dependent",
+    "debt_per_income"
+  ],
+  "medians": {
+    "MonthlyIncome": 5390.0,
+    "NumberOfDependents": 0.0
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "medians": {
+    "MonthlyIncome": 5390.0,
+    "NumberOfDependents": 0.0
+  },
+  "features": [
+    "RevolvingUtilizationOfUnsecuredLines",
+    "age",
+    "NumberOfTime30-59DaysPastDueNotWorse",
+    "DebtRatio",
+    "MonthlyIncome",
+    "NumberOfOpenCreditLinesAndLoans",
+    "NumberOfTimes90DaysLate",
+    "NumberRealEstateLoansOrLines",
+    "NumberOfTime60-89DaysPastDueNotWorse",
+    "NumberOfDependents"
+  ],
+  "holdout_auc": 0.8667435616075804,
+  "best_iteration": 119,
+  "audit": {
+    "n_train": 120000,
+    "pos_rate": 0.06684166666666666,
+    "missing": {
+      "RevolvingUtilizationOfUnsecuredLines": 0,
+      "age": 0,
+      "NumberOfTime30-59DaysPastDueNotWorse": 0,
+      "DebtRatio": 0,
+      "MonthlyIncome": 23675,
+      "NumberOfOpenCreditLinesAndLoans": 0,
+      "NumberOfTimes90DaysLate": 0,
+      "NumberRealEstateLoansOrLines": 0,
+      "NumberOfTime60-89DaysPastDueNotWorse": 0,
+      "NumberOfDependents": 3128
+    },
+    "ru_gt1": 2640,
+    "NumberOfTime30-59DaysPastDueNotWorse_sentinel_96_98": 214,
+    "NumberOfTimes90DaysLate_sentinel_96_98": 214,
+    "NumberOfTime60-89DaysPastDueNotWorse_sentinel_96_98": 214,
+    "DebtRatio_q": {
+      "0.5": 0.36619425,
+      "0.9": 1263.0,
+      "0.99": 4977.0,
+      "0.995": 6185.0
+    },
+    "MonthlyIncome_q": {
+      "0.5": 5390.0,
+      "0.9": 11640.600000000006,
+      "0.99": 25000.0,
+      "0.995": 35000.0
+    },
+    "dup_feature_rows": 464
+  },
+  "params": {
+    "num_leaves": 31,
+    "lr": 0.05,
+    "n_estimators": 600,
+    "seed": 42,
+    "n_jobs": 4
+  }
+}

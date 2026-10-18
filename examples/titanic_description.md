@@ -6,7 +6,7 @@ Predict each passenger's survival from passenger attributes. The target is
 
 ## Local files
 
-The official competition archive was downloaded into `data/titanic/`:
+The ready-to-use competition CSV files are included in `data/titanic/`:
 
 | File | Rows | Purpose |
 | --- | ---: | --- |
@@ -15,12 +15,9 @@ The official competition archive was downloaded into `data/titanic/`:
 | `gender_submission.csv` | 418 | Example predictions, **not ground truth** |
 
 `data/titanic/sources.json` records the download time and SHA-256 checksums.
-Official task text (`description.md`), evaluation (`evaluation.html`), and data
-dictionary (`data_description.html`) are archived under `data/titanic/source/`,
-alongside the raw page HTML, competition metadata, and page API response.
-Downloaded files and generated results stay local and are ignored by Git.
-On another machine, download the official competition ZIP after accepting its
-rules and extract these CSV files into `data/titanic/`.
+The downloaded archive and raw source-page snapshots stay local. Generated
+results are ignored by Git; a reviewed record of the completed run is available
+in `test_runs/titanic/2026-10-18-deepseek/`.
 
 ## Fields
 

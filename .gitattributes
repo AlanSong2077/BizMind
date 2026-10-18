@@ -1,0 +1,2 @@
+# Preserve dataset bytes so source and prepared-data checksums remain portable.
+data/**/*.csv -text

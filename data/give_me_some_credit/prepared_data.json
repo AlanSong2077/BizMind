@@ -1,0 +1,47 @@
+{
+  "transformations": [
+    "Rename Unnamed: 0 to Id",
+    "Drop the all-empty test target column"
+  ],
+  "feature_values_changed": false,
+  "train_positive_rows": 10026,
+  "files": {
+    "train.csv": {
+      "rows": 150000,
+      "columns": [
+        "Id",
+        "SeriousDlqin2yrs",
+        "RevolvingUtilizationOfUnsecuredLines",
+        "age",
+        "NumberOfTime30-59DaysPastDueNotWorse",
+        "DebtRatio",
+        "MonthlyIncome",
+        "NumberOfOpenCreditLinesAndLoans",
+        "NumberOfTimes90DaysLate",
+        "NumberRealEstateLoansOrLines",
+        "NumberOfTime60-89DaysPastDueNotWorse",
+        "NumberOfDependents"
+      ],
+      "bytes": 7970667,
+      "sha256": "6a60d276344941f6259c395c152200d2f1ca7e7527b7b31e6eee7b7e63b734a8"
+    },
+    "test.csv": {
+      "rows": 101503,
+      "columns": [
+        "Id",
+        "RevolvingUtilizationOfUnsecuredLines",
+        "age",
+        "NumberOfTime30-59DaysPastDueNotWorse",
+        "DebtRatio",
+        "MonthlyIncome",
+        "NumberOfOpenCreditLinesAndLoans",
+        "NumberOfTimes90DaysLate",
+        "NumberRealEstateLoansOrLines",
+        "NumberOfTime60-89DaysPastDueNotWorse",
+        "NumberOfDependents"
+      ],
+      "bytes": 5156138,
+      "sha256": "729ab4daac8bf4314eea057f5ebd29f44eb55fbc89b87ff8e931f0ba1ce01f15"
+    }
+  }
+}

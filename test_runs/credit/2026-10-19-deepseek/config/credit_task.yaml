@@ -1,0 +1,59 @@
+# Relative data paths are resolved from this YAML file.
+background: 使用 Give Me Some Credit 数据进行中型表格二分类自迭代测试。
+objective: 预测每位借款人未来两年发生严重逾期的概率，即 SeriousDlqin2yrs=1 的概率。
+description: |
+  原始数据来自 Kaggle Give Me Some Credit，已下载并仅规范化 ID 列及移除测试集的空标签列。
+  train.csv 含 150000 行标签数据，test.csv 含 101503 行无标签数据，共 10 个数值特征。
+  训练集正类为 10026 行，约 6.684%；主指标为 ROC-AUC，不能用多数类 Accuracy 代替。
+  先建立可执行的 CPU 基线，再根据固定验证集的实测 ROC-AUC 改进。
+
+data:
+  train: ../data/give_me_some_credit/train.csv
+  predict: ../data/give_me_some_credit/test.csv
+  target_column: SeriousDlqin2yrs
+  id_column: Id
+  schema:
+    Id: 行标识，仅用于预测对齐。训练集和测试集分别编号，ID 可能重叠，禁止据此关联标签。
+    SeriousDlqin2yrs: 二分类标签，1 表示两年内发生严重逾期，0 表示未发生；仅训练集包含。
+    RevolvingUtilizationOfUnsecuredLines: 无担保循环信贷额度使用比例。
+    age: 年龄。
+    NumberOfTime30-59DaysPastDueNotWorse: 过去两年逾期 30 至 59 天的次数。
+    DebtRatio: 债务支出与收入的比值。
+    MonthlyIncome: 月收入；可能缺失。
+    NumberOfOpenCreditLinesAndLoans: 在用信用账户及贷款数量。
+    NumberOfTimes90DaysLate: 过去两年逾期至少 90 天的次数。
+    NumberRealEstateLoansOrLines: 房地产贷款或授信数量。
+    NumberOfTime60-89DaysPastDueNotWorse: 过去两年逾期 60 至 89 天的次数。
+    NumberOfDependents: 被赡养人数；可能缺失。
+
+evaluation:
+  primary_metric: roc_auc
+  direction: maximize
+  validation: |
+    评估器只划分一次：对原始行序的 150000 行训练数据执行
+    train_test_split(test_size=0.2, random_state=42, stratify=train['SeriousDlqin2yrs'])，
+    得到 120000 行训练和 30000 行固定验证。验证标签只存在评估器私有目录。
+    编码代理收到的是已经划分的 120000 行训练数据与 validation_data/ 内的 30000 行无标签验证特征。
+    不要再拆分公开训练数据来替代固定验证集；各轮使用同一组验证 Id。
+    输出验证集的 Id 和 Probability，按 Id 对齐私有标签，以 sklearn.metrics.roc_auc_score 评分。
+    验证输出必须恰好覆盖所有验证 Id，无重复、缺失或额外 ID，Probability 必须有限且位于 [0,1]。
+  test_scoring: 官方预测集不含真实标签，只生成预测，不报告官方测试集 AUC。
+
+constraints:
+  - 只读取运行时映射的本地 train_data/train.csv、predict_data/test.csv 和固定验证输入。
+  - 不下载额外数据、模型或历史解答，不把 sampleEntry.csv 当真实标签，不读取评估器私有文件。
+  - 不把 Id 当模型特征，也不通过训练与测试之间重叠的 Id 查找标签。
+  - 缺失值填充、异常值裁剪、缩放及特征选择只在训练子集拟合；不删除或重排验证及预测样本。
+  - 优先使用已安装的 LightGBM CPU 模型或简单 sklearn 基线，不依赖 CUDA、MPS、CatBoost 或新装依赖。
+  - 固定随机种子为 42，n_jobs 不超过 4；先用适量树数和较小叶数，避免大型随机森林、全量网格搜索及大量交叉验证。
+  - 主评分输入必须为 predict_proba 的正类概率，不先阈值化成 0/1；类别平衡操作仅允许用于训练子集。
+  - 保存与实测验证成绩对应的模型与预处理，验证和预测文件来自同一模型，不为输出文件单独重训全量数据。
+
+output:
+  prediction_file: predictions.csv
+  columns: [Id, Probability]
+  format: |
+    预测 CSV 恰好两列 Id,Probability，101503 行，保持 test.csv 原始 Id 顺序，不输出额外索引。
+    Probability 是 SeriousDlqin2yrs=1 的有限浮点概率，位于 [0,1]。
+    另存固定验证集的 Id,Probability CSV，30000 行，按编码代理协议返回两个不同的文件路径。
+  artifacts: 保存模型、预处理流程、实测 ROC-AUC 和推理说明。
