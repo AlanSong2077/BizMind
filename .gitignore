@@ -1,0 +1,13 @@
+workspace/
+datasets/
+*.egg-info
+__pycache__
+.pytest_cache
+.vscode
+datasets.tar.xz
+CO-Bench
+run.sh
+
+.venv/
+build/
+dist/

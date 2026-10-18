@@ -1,0 +1,31 @@
+# 业务与数据统一入口。请修改业务字段，并提供真实本地数据。
+# data 中的相对路径以本文件所在目录为基准。
+background: 面向现有客户开展流失风险分析，支持运营人员确定联系优先级。
+objective: 使用预测时可获取的历史信息，预测客户未来 30 天是否流失。
+description: |
+  这是一个表格二分类任务。禁止使用预测时点后的信息。
+  先建立简单基线，再在本地验证集上优化主指标。
+
+data:
+  train: ../data/train.csv
+  predict: ../data/test.csv
+  target_column: churn
+  id_column: customer_id
+  time_column: snapshot_date
+
+evaluation:
+  primary_metric: roc_auc
+  direction: maximize
+  validation: 按 snapshot_date 划分，较早的 80% 用于训练，最近的 20% 用于验证；相同时间点不跨集合。
+
+constraints:
+  - 只使用提供的本地数据；根据本地验证结果自迭代，不下载外部数据或预训练模型。
+  - 根据自动检测的 CUDA、Mac MPS 或 CPU 选择兼容实现。
+  - 预处理仅在训练部分拟合，不使用隐藏验证标签。
+  - 资源预算以执行配置为上限，控制模型和 batch size 的内存占用。
+
+output:
+  prediction_file: predictions.csv
+  columns: [customer_id, churn]
+  format: 每个预测样本一行，churn 为流失概率；保持原始顺序，不输出额外索引。
+  artifacts: 保存模型、预处理流程、推理说明和验证指标。

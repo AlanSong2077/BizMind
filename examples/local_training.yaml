@@ -1,0 +1,25 @@
+# Run from the project root: python main.py --config examples/local_training.yaml
+# Edit examples/business_task.yaml and provide real local data first.
+task:
+  id: local-business
+  input_file: ./examples/business_task.yaml
+
+llm:
+  model: gpt-5-mini
+  max_retries: 3
+  timeout: 600
+
+agent:
+  num_code_agents: 1
+  num_iterations: 3
+  num_iterations_code_agents: 20
+  time_limit_code_agents: 18000
+  workspace_dir: workspace
+  prediction_file_name: predictions.csv
+
+execution:
+  device: auto
+  max_gpu_count: 1
+  max_cpu_cores: 4
+  timeout: 3600
+  inspect_interval: 600

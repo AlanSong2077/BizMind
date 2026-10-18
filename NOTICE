@@ -1,0 +1,9 @@
+BizMind ML is an independently maintained business-oriented ML experiment tool.
+
+Portions of the initial code structure were adapted from CoMind:
+https://github.com/comind-ml/CoMind
+Copyright (c) 2026 CoMind
+
+The original MIT copyright and permission notice is retained in LICENSE.
+This attribution describes code provenance; it does not imply affiliation,
+endorsement, or compatibility with the original project.

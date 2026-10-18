@@ -1,0 +1,26 @@
+task:
+  id: business-task
+  input_file: ./examples/business_task.yaml
+  train_data: null # Overrides data.train in the business task file
+  predict_data: null # Overrides data.predict in the business task file
+  input_dir: null # Alternative: a local directory whose layout is described in the task
+
+llm:
+  model: gpt-5-mini
+  max_retries: 3
+  timeout: 600
+
+agent:
+  num_code_agents: 1
+  num_iterations: 3
+  num_iterations_code_agents: 20
+  time_limit_code_agents: 18000 # Seconds per worker
+  workspace_dir: workspace
+  prediction_file_name: predictions.csv
+
+execution:
+  device: auto # CUDA -> Mac MPS -> CPU
+  inspect_interval: 600
+  timeout: 3600 # Seconds per notebook cell
+  max_cpu_cores: 4
+  max_gpu_count: 1 # 0 forces CPU; MPS uses one shared Apple GPU
