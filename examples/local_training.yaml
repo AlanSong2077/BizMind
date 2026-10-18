@@ -1,8 +1,8 @@
-# Run from the project root: python main.py --config examples/local_training.yaml
-# Edit examples/business_task.yaml and provide real local data first.
+# Run from the project root: ./start.sh --config examples/local_training.yaml
+# Local Titanic fixture; see examples/titanic_description.md for setup and checks.
 task:
-  id: local-business
-  input_file: ./examples/business_task.yaml
+  id: titanic-local
+  input_file: ./examples/titanic_task.yaml
 
 llm:
   model: deepseek/deepseek-flash
@@ -24,8 +24,8 @@ agent:
   prediction_file_name: predictions.csv
 
 execution:
-  device: auto
-  max_gpu_count: 1
+  device: cpu
+  max_gpu_count: 0
   max_cpu_cores: 4
   timeout: 3600
   inspect_interval: 600
