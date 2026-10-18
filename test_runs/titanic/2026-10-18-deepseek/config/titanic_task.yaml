@@ -1,0 +1,56 @@
+# Paths below are relative to this YAML file. No online service is used at runtime.
+background: 使用 Titanic 乘客信息构造本地机器学习自迭代测试。
+objective: 根据乘客特征预测 Survived，0 表示未生存，1 表示生存。
+description: |
+  表格二分类任务。train.csv 有 891 行已标注数据，test.csv 有 418 行无标签数据。
+  先训练简单 CPU 基线，再根据固定本地验证集的 Accuracy 改进特征、模型或参数。
+  使用提供的数据独立完成实验，不查找外部标签、历史解答或排行榜成绩。
+
+data:
+  train: ../data/titanic/train.csv
+  predict: ../data/titanic/test.csv
+  target_column: Survived
+  id_column: PassengerId
+  schema:
+    PassengerId: 乘客唯一标识；用于预测对齐，不作为基线模型特征。
+    Survived: 目标标签；0 未生存，1 生存，仅训练集包含此列。
+    Pclass: 船票等级；1 一等，2 二等，3 三等。
+    Name: 乘客姓名。
+    Sex: 性别。
+    Age: 年龄，单位为年；可能缺失，婴儿年龄可为小数。
+    SibSp: 同船兄弟姐妹及配偶人数。
+    Parch: 同船父母及子女人数。
+    Ticket: 船票编号。
+    Fare: 票价；可能缺失。
+    Cabin: 舱位编号；可能缺失。
+    Embarked: 登船港口；C 为 Cherbourg，Q 为 Queenstown，S 为 Southampton，可能缺失。
+
+evaluation:
+  primary_metric: accuracy
+  direction: maximize
+  formula: 正确预测数 / 验证样本总数；取值 0 到 1。
+  validation: |
+    使用 sklearn.model_selection.train_test_split(test_size=0.2, random_state=42,
+    stratify=train['Survived'])，保留原始行顺序作为划分输入，得到 712 行训练、179 行验证。
+    该划分只生成一次，所有自迭代轮次使用同一组 PassengerId。
+    验证特征移除 Survived，标签保存在评估器私有目录；编码代理不得读取验证标签。
+    预测必须根据 PassengerId 与验证标签逐行对齐；拒绝缺失、重复、额外 ID 或非 0/1 值。
+  test_scoring: test.csv 没有真实标签，只生成预测，不能报告官方测试集准确率。
+
+constraints:
+  - 只读取运行时映射的本地 train_data/train.csv 和 predict_data/test.csv，不下载数据或模型。
+  - 不使用 gender_submission.csv 训练或评分，它只是提交格式示例，不是真实标签。
+  - 预处理、缺失值填充、编码、特征选择只在训练子集拟合，验证和预测只做 transform。
+  - 优先使用 sklearn 或 LightGBM 的 CPU 模型，不依赖 CUDA、MPS 或大型预训练模型。
+  - 固定随机种子为 42；限制并行度不超过执行配置，避免大规模网格搜索。
+  - 如使用 predict_proba，统一以概率 >= 0.5 转换为 1，否则为 0，再计算准确率和导出预测。
+  - 保存与当前验证成绩对应的模型和预处理流程，保持验证与测试预测来自同一模型。
+
+output:
+  prediction_file: predictions.csv
+  columns: [PassengerId, Survived]
+  format: |
+    预测文件必须含表头、418 行、恰好两列 PassengerId 和 Survived，不输出额外索引。
+    PassengerId 保持 test.csv 原始顺序，Survived 为整数 0 或 1，不是概率。
+    另存验证预测 CSV，使用相同两列并与固定验证集对齐，交由独立评估器计算指标。
+  artifacts: 保存模型、预处理流程、验证指标和推理说明，并按编码代理协议返回验证及测试预测路径。

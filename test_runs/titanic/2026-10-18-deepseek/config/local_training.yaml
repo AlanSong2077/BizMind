@@ -1,0 +1,31 @@
+# Run from the project root: ./start.sh --config examples/local_training.yaml
+# Local Titanic fixture; see examples/titanic_description.md for setup and checks.
+task:
+  id: titanic-local
+  input_file: ./examples/titanic_task.yaml
+
+llm:
+  model: deepseek/deepseek-flash
+  api_base: https://api.deepseek.com
+  # Set DEEPSEEK_API_KEY in the project .env or terminal; keep it out of this file.
+  max_retries: 3
+  timeout: 600
+  max_tokens: 16384
+  extra_body:
+    thinking:
+      type: disabled
+
+agent:
+  num_code_agents: 1
+  num_iterations: 3
+  num_iterations_code_agents: 20
+  time_limit_code_agents: 18000
+  workspace_dir: workspace
+  prediction_file_name: predictions.csv
+
+execution:
+  device: cpu
+  max_gpu_count: 0
+  max_cpu_cores: 4
+  timeout: 3600
+  inspect_interval: 600

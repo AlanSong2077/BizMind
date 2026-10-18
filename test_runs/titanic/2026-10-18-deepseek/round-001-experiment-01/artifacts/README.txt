@@ -1,0 +1,1 @@
+Inference: load model_blend_et.joblib; prob=0.5*lr.predict_proba+0.5*et.predict_proba; >=0.5 -> 1. Features as best LR. Seed 42, CPU, n_jobs=4.

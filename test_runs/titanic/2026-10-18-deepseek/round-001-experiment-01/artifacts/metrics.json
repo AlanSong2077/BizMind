@@ -1,0 +1,4 @@
+{
+  "model": "0.5*LR + 0.5*ExtraTrees",
+  "seed": 42
+}

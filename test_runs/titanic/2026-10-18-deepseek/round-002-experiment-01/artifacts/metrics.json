@@ -1,0 +1,37 @@
+{
+  "seed": 42,
+  "round": 22,
+  "status": "FINAL canonical incumbent (gini) verified",
+  "config": {
+    "w": 0.5,
+    "lr_C": 1.0,
+    "et_n_estimators": 400,
+    "et_max_depth": 6,
+    "et_min_samples_leaf": 4,
+    "et_criterion": "gini",
+    "threshold": 0.5
+  },
+  "best_fixed_val_accuracy": 0.8492,
+  "pinned_outputs": {
+    "val_md5": "cceba64816",
+    "test_md5": "42c718fef6"
+  },
+  "perturbation_log": {
+    "r4_cv_tuned": 0.8436,
+    "r6_interactions": 0.8212,
+    "r8_lr_et_gb": 0.8436,
+    "r10_more_trees": 0.8436,
+    "r12_threshold_0.45": 0.838,
+    "r16_seed_bag": 0.8436,
+    "r18_lr_C0.3": 0.838,
+    "r21_et_entropy": "identical predictions (0.8492-equivalent)"
+  },
+  "conclusion": "Canonical incumbent is the stable optimum; entropy criterion produced identical outputs. All meaningful perturbations regressed. Iteration finalized.",
+  "deliverables": {
+    "test": "predictions.csv",
+    "val": "work/val_predictions.csv",
+    "model": "work/model_blend_best.joblib",
+    "metrics": "work/metrics.json",
+    "readme": "work/README.txt"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "replay_success": true,
+  "source": "round-001-experiment-01, executed notebook cell 20",
+  "fresh_process": true,
+  "llm_calls_during_replay": 0,
+  "validation_accuracy": 0.8491620111731844,
+  "validation_correct": 152,
+  "validation_rows": 179,
+  "prediction_rows": 418,
+  "test_predictions_byte_identical": true,
+  "stdout": "val pos 0.346 test pos 0.383",
+  "used_archived_split_and_scorer": true,
+  "archived_scorer_accuracy": 0.8491620111731844,
+  "python_version": "3.12.13",
+  "packages": {
+    "numpy": "2.3.2",
+    "pandas": "2.3.2",
+    "scikit-learn": "1.7.1"
+  }
+}

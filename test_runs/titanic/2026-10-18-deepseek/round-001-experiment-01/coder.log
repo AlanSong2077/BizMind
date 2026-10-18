@@ -1,0 +1,1469 @@
+[2026-10-18 23:25:59,399 coder-round-001-experiment-01 INFO] Code iteration 1: Establish the baseline: load the actual local data, run data-quality checks, create the single fixed split (persist val_ids.json), fit a LogisticRegression with median-imputed Age/Fare + missing indicators, one-hot Sex/Embarked, and print validation accuracy. Expected runtime a few seconds. Tests the hypothesis that baseline validation accuracy lands ~0.780.82 above the majority and Sex-only floors. This cell writes both complete prediction outputs.
+import os, json, joblib, numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer, MissingIndicator
+from sklearn.linear_model import LogisticRegression
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+os.makedirs("work", exist_ok=True)
+
+# --- schema / integrity checks ---
+print("train shape", train.shape, "test shape", test.shape)
+print("train cols", list(train.columns))
+print("test cols", list(test.columns))
+assert train["PassengerId"].is_unique, "dup train id"
+assert test["PassengerId"].is_unique, "dup test id"
+assert set(train["Survived"].unique()) <= {0, 1}, "bad labels"
+print("\nNaN fraction (train):\n", train.isna().mean().round(3))
+print("\nNaN fraction (test):\n", test.isna().mean().round(3))
+print("\nSex train:", train["Sex"].value_counts().to_dict(), "test:", test["Sex"].value_counts().to_dict())
+print("Embarked train:", train["Embarked"].value_counts(dropna=False).to_dict())
+print("Embarked test:", test["Embarked"].value_counts(dropna=False).to_dict())
+print("\nAge range train:", train["Age"].min(), train["Age"].max(), "test:", test["Age"].min(), test["Age"].max())
+print("Fare range train:", train["Fare"].min(), train["Fare"].max(), "test:", test["Fare"].min(), test["Fare"].max())
+print("Survived dist:\n", train["Survived"].value_counts(normalize=True).round(3))
+
+# --- fixed split (once) ---
+X = train.drop(columns=["Survived"])
+y = train["Survived"]
+X_tr, X_val, y_tr, y_val = train_test_split(
+    X, y, test_size=0.2, random_state=seed, stratify=y)
+val_ids = X_val["PassengerId"].tolist()
+json.dump(val_ids, open("work/val_ids.json", "w"))
+print("\nsplit sizes train/val:", len(X_tr), len(X_val))
+
+# --- preprocessing (fit on train rows only) ---
+num_cols = ["Pclass", "SibSp", "Parch"]
+age_fare_features = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked"]
+
+age_fare_pipe = Pipeline([
+    ("imp", SimpleImputer(strategy="median", add_indicator=True)),
+])
+num_pipe = Pipeline([
+    ("imp", SimpleImputer(strategy="median")),
+])
+cat_pipe = Pipeline([
+    ("imp", SimpleImputer(strategy="constant", fill_value="M")),
+    ("oh", OneHotEncoder(handle_unknown="ignore")),
+])
+
+pre = ColumnTransformer([
+    ("num", num_pipe, num_cols),
+    ("af", age_fare_pipe, age_fare_features),
+    ("cat", cat_pipe, cat_cols),
+])
+
+clf = Pipeline([
+    ("pre", pre),
+    ("lr", LogisticRegression(max_iter=1000, random_state=seed)),
+])
+clf.fit(X_tr, y_tr)
+
+# --- validation ---
+val_prob = clf.predict_proba(X_val)[:, 1]
+val_pred = (val_prob >= 0.5).astype(int)
+val_acc = float((val_pred == y_val.values).mean())
+maj_rate = float(y_val.value_counts(normalize=True).max())
+sex_rule = (X_val["Sex"] == "female").astype(int).values
+sex_acc = float((sex_rule == y_val.values).mean())
+print(f"\nVAL accuracy: {val_acc:.4f} | majority floor: {maj_rate:.4f} | sex-only floor: {sex_acc:.4f}")
+
+os.makedirs("work", exist_ok=True)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+# --- test predictions ---
+test_prob = clf.predict_proba(test)[:, 1]
+test_pred = (test_prob >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": test["PassengerId"].values,
+              "Survived": test_pred}).to_csv("predictions.csv", index=False)
+
+# --- artifacts ---
+json.dump({"val_accuracy": val_acc, "majority_baseline": maj_rate,
+           "sex_only_baseline": sex_acc, "model": "LogisticRegression baseline",
+           "seed": seed}, open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_baseline.joblib")
+open("work/README.txt", "w").write(
+    "Inference: load model_baseline.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "Preprocessing fitted on 712 train rows only. Sex/Embarked one-hot "
+    "(Embarked missing->'M'); Age/Fare median-imputed with missing indicators; "
+    "Pclass/SibSp/Parch numeric. CPU only, seed 42.")
+
+# --- alignment checks on outputs ---
+vp = pd.read_csv("work/val_predictions.csv")
+pp = pd.read_csv("predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids
+assert len(pp) == len(test) == 418 and list(pp.columns) == ["PassengerId", "Survived"]
+assert pp["PassengerId"].tolist() == test["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("predictions.csv rows:", len(pp), "val rows:", len(vp), "positive rate test:", pp["Survived"].mean().round(3))
+[2026-10-18 23:26:00,627 coder-round-001-experiment-01 INFO] Execution time: 0.98 seconds; success: True.
+<output>train shape (712, 12) test shape (418, 11)
+train cols ['PassengerId', 'Survived', 'Pclass', 'Name', 'Sex', 'Age', 'SibSp', 'Parch', 'Ticket', 'Fare', 'Cabin', 'Embarked']
+test cols ['PassengerId', 'Pclass', 'Name', 'Sex', 'Age', 'SibSp', 'Parch', 'Ticket', 'Fare', 'Cabin', 'Embarked']
+NaN fraction (train):
+ PassengerId    0.000
+Survived       0.000
+Pclass         0.000
+Name           0.000
+Sex            0.000
+Age            0.192
+SibSp          0.000
+Parch          0.000
+Ticket         0.000
+Fare           0.000
+Cabin          0.775
+Embarked       0.003
+dtype: float64
+NaN fraction (test):
+ PassengerId    0.000
+Pclass         0.000
+Name           0.000
+Sex            0.000
+Age            0.206
+SibSp          0.000
+Parch          0.000
+Ticket         0.000
+Fare           0.002
+Cabin          0.782
+Embarked       0.000
+dtype: float64
+Sex train: {'male': 459, 'female': 253} test: {'male': 266, 'female': 152}
+Embarked train: {'S': 516, 'C': 139, 'Q': 55, nan: 2}
+Embarked test: {'S': 270, 'C': 102, 'Q': 46}
+Age range train: 0.42 80.0 test: 0.17 76.0
+Fare range train: 0.0 512.3292 test: 0.0 512.3292
+Survived dist:
+ Survived
+0    0.617
+1    0.383
+Name: proportion, dtype: float64
+split sizes train/val: 569 143
+VAL accuracy: 0.7692 | majority floor: 0.6154 | sex-only floor: 0.7762
+predictions.csv rows: 418 val rows: 143 positive rate test: 0.364</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Validation failed: Evaluation script failed: {"score": null, "success": false, "message": "prediction row count 143 != expected 179"}
+
+[2026-10-18 23:26:02,550 coder-round-001-experiment-01 INFO] Code iteration 2: The local train.csv has 712 rows (already the training split), not 891. The evaluator expects 179 validation rows, meaning the split must be applied to the full original 891-row dataset  but train.csv here only has 712. The validation data lives in ../input/data/validation_data/validation.csv (179 rows). I will reconstruct the fixed split correctly: instead of splitting the 712-row train, I need to check what's actually available. Inspect validation.csv and validation_schema.json, then build the split so validation = 179 rows from validation.csv's PassengersId, training on the remaining rows. Expected runtime a second. Tests whether the correct 179-row validation alignment resolves the count mismatch.
+import os, json, glob
+base = "../input/data"
+print("tree:")
+for p in sorted(glob.glob(base + "/**/*", recursive=True)):
+    print(" ", p)
+
+val_df = pd.read_csv(f"{base}/validation_data/validation.csv")
+print("\nvalidation.csv shape", val_df.shape, "cols", list(val_df.columns))
+print(val_df.head())
+print("\nvalidation_schema.json:")
+print(open(f"{base}/validation_schema.json").read()[:1500])
+print("\nsample pred cols:")
+sp = pd.read_csv(f"{base}/validation_sample_predictions.csv")
+print(sp.shape, list(sp.columns), sp.head())
+[2026-10-18 23:26:02,566 coder-round-001-experiment-01 INFO] Execution time: 0.02 seconds; success: True.
+<output>tree:
+  ../input/data/predict_data
+  ../input/data/predict_data/test.csv
+  ../input/data/train_data
+  ../input/data/train_data/train.csv
+  ../input/data/validation_data
+  ../input/data/validation_data/validation.csv
+  ../input/data/validation_sample_predictions.csv
+  ../input/data/validation_schema.json
+validation.csv shape (179, 11) cols ['PassengerId', 'Pclass', 'Name', 'Sex', 'Age', 'SibSp', 'Parch', 'Ticket', 'Fare', 'Cabin', 'Embarked']
+   PassengerId  Pclass                               Name     Sex   Age  \
+0          566       3               Davies, Mr. Alfred J    male  24.0   
+1          161       3           Cribb, Mr. John Hatfield    male  44.0   
+2          554       3  Leeni, Mr. Fahim ("Philip Zenni")    male  22.0   
+3          861       3            Hansen, Mr. Claus Peter    male  41.0   
+4          242       3     Murphy, Miss. Katherine "Kate"  female   NaN   
+   SibSp  Parch     Ticket     Fare Cabin Embarked  
+0      2      0  A/4 48871  24.1500   NaN        S  
+1      0      1     371362  16.1000   NaN        S  
+2      0      0       2620   7.2250   NaN        C  
+3      2      0     350026  14.1083   NaN        S  
+4      1      0     367230  15.5000   NaN        Q  
+validation_schema.json:
+{
+  "validation_data/validation.csv": {
+    "rows": 179,
+    "columns": [
+      "PassengerId",
+      "Pclass",
+      "Name",
+      "Sex",
+      "Age",
+      "SibSp",
+      "Parch",
+      "Ticket",
+      "Fare",
+      "Cabin",
+      "Embarked"
+    ],
+    "id_column": "PassengerId",
+    "target_column_absent": "Survived",
+    "note": "Features only. Align by PassengerId with predictions."
+  },
+  "train_data/train.csv": {
+    "rows": 712,
+    "columns": [
+      "PassengerId",
+      "Survived",
+      "Pclass",
+      "Name",
+      "Sex",
+      "Age",
+      "SibSp",
+      "Parch",
+      "Ticket",
+      "Fare",
+      "Cabin",
+      "Embarked"
+    ],
+    "note": "Labeled training split (Survived included)."
+  },
+  "predict_data/test.csv": {
+    "rows": 418,
+    "columns": [
+      "PassengerId",
+      "Pclass",
+      "Name",
+      "Sex",
+      "Age",
+      "SibSp",
+      "Parch",
+      "Ticket",
+      "Fare",
+      "Cabin",
+      "Embarked"
+    ],
+    "note": "Unchanged unlabeled prediction inputs."
+  },
+  "split": {
+    "strategy": "train_test_split(test_size=0.2, random_state=42, stratify=Survived)",
+    "seed": 42,
+    "test_size": 0.2,
+    "rows_train": 712,
+    "rows_val": 179,
+    "rows_test": 418
+  }
+}
+sample pred cols:
+(179, 2) ['PassengerId', 'Survived']    PassengerId  Survived
+0          566         0
+1          161         0
+2          554         0
+3          861         0
+4          242         0</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+[2026-10-18 23:26:06,256 coder-round-001-experiment-01 INFO] Code iteration 3: The validation inputs are the 179-row validation.csv (features only, aligned by PassengerId to the sample predictions). So the correct setup is: train on the full 712-row train.csv, predict the 179 validation rows from validation_data/validation.csv, and predict the 418 test rows. My earlier mistake was re-splitting the 712 rows. I will retrain the baseline pipeline on all 712 rows, transform validation.csv and test.csv, and write both complete outputs aligned to the actual validation IDs. Expected runtime ~1s. Tests whether using the true 179-row validation set fixes the row-count failure and gives a representative baseline accuracy.
+import os, json, joblib, numpy as np, pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+os.makedirs("work", exist_ok=True)
+
+assert train["PassengerId"].is_unique and val["PassengerId"].is_unique and test["PassengerId"].is_unique
+assert set(train["Survived"].unique()) <= {0, 1}
+print("shapes: train", train.shape, "val", val.shape, "test", test.shape)
+
+X_tr = train.drop(columns=["Survived"])
+y_tr = train["Survived"].values
+val_ids = val["PassengerId"].tolist()
+json.dump(val_ids, open("work/val_ids.json", "w"))
+
+num_cols = ["Pclass", "SibSp", "Parch"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked"]
+
+pre = ColumnTransformer([
+    ("num", SimpleImputer(strategy="median"), num_cols),
+    ("af", SimpleImputer(strategy="median", add_indicator=True), af_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre),
+                ("lr", LogisticRegression(max_iter=1000, random_state=seed))])
+clf.fit(X_tr, y_tr)
+
+# validation predictions (no labels available locally)
+val_pred = (clf.predict_proba(val)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+# test predictions
+test_pred = (clf.predict_proba(test)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": test["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+# training-fit sanity (in-sample), informational only
+tr_pred = (clf.predict_proba(X_tr)[:, 1] >= 0.5).astype(int)
+print("in-sample acc:", (tr_pred == y_tr).mean().round(4))
+
+json.dump({"model": "LogisticRegression baseline", "seed": seed,
+           "trained_on": "train_data/train.csv (712 rows)",
+           "validation": "validation_data/validation.csv (179 rows)",
+           "note": "val accuracy computed by external evaluator"},
+          open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_baseline.joblib")
+open("work/README.txt", "w").write(
+    "Inference: load model_baseline.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "Trained on all 712 train rows. Sex/Embarked one-hot (Embarked missing->'M'); "
+    "Age/Fare median-imputed with missing indicators; Pclass/SibSp/Parch numeric. "
+    "Seed 42, CPU only.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == test["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("val rows", len(vp), "test rows", len(pp), "test pos rate", pp["Survived"].mean().round(3))
+[2026-10-18 23:26:06,586 coder-round-001-experiment-01 INFO] Execution time: 0.05 seconds; success: True.
+<output>shapes: train (712, 12) val (179, 11) test (418, 11)
+in-sample acc: 0.802
+val rows 179 test rows 418 test pos rate 0.359</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8156). Best so far: Metric(0.8156).
+
+[2026-10-18 23:26:10,179 coder-round-001-experiment-01 INFO] Code iteration 4: Baseline reached 0.8156. Now test a controlled feature-engineering improvement, holding the model fixed (LogisticRegression, same split, seed 42): add family size (SibSp+Parch+1), IsAlone, and title extracted from Name (Mr/Mrs/Miss/Master/rareRare). Expected runtime ~1s. If validation accuracy rises above 0.8156, the added features carry useful signal; otherwise the baseline stays best. This rewrites both complete output files.
+import os, json, joblib, numpy as np, pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title"]
+
+pre = ColumnTransformer([
+    ("num", SimpleImputer(strategy="median"), num_cols),
+    ("af", SimpleImputer(strategy="median", add_indicator=True), af_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre),
+                ("lr", LogisticRegression(max_iter=1000, random_state=seed))])
+clf.fit(X_tr, y_tr)
+
+val_pred = (clf.predict_proba(val_f)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "LogisticRegression + Title/FamilySize/IsAlone", "seed": seed},
+          open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_fe1.joblib")
+open("work/README.txt", "w").write(
+    "Inference: load model_fe1.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "Features: Pclass,SibSp,Parch,FamilySize,IsAlone numeric; Age/Fare median+indicator; "
+    "Sex/Embarked(missing->'M')/Title one-hot. Seed 42, CPU only.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("Title train dist:", tr_f["Title"].value_counts().to_dict())
+print("val rows", len(vp), "test rows", len(pp), "test pos rate", pp["Survived"].mean().round(3))
+[2026-10-18 23:26:10,488 coder-round-001-experiment-01 INFO] Execution time: 0.07 seconds; success: True.
+<output>Title train dist: {'Mr': 412, 'Miss': 144, 'Mrs': 107, 'Master': 31, 'Rare': 18}
+val rows 179 test rows 418 test pos rate 0.39</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:14,105 coder-round-001-experiment-01 INFO] Code iteration 5: Improved to 0.8436. Next single controlled change: keep the same features but switch the model from LogisticRegression to a tree ensemble (RandomForest) to capture nonlinear interactions (e.g. PclassSex, Fare bins). Hold features, split, seed fixed at 42. Expected runtime ~2s. If validation accuracy beats 0.8436, non-linearities add signal; otherwise LR with engineered features stays best. Writes both complete outputs.
+import os, json, joblib, numpy as np, pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone", "Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title"]
+
+pre = ColumnTransformer([
+    ("num", SimpleImputer(strategy="median"), num_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre),
+                ("rf", RandomForestClassifier(n_estimators=400, max_depth=6,
+                                              min_samples_leaf=3, random_state=seed,
+                                              n_jobs=4))])
+clf.fit(X_tr, y_tr)
+
+val_pred = (clf.predict_proba(val_f)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "RandomForest + Title/FamilySize", "seed": seed,
+           "params": {"n_estimators":400,"max_depth":6,"min_samples_leaf":3}},
+          open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_rf.joblib")
+open("work/README.txt", "w").write(
+    "Inference: load model_rf.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "RandomForest(400, depth 6) on engineered features. Seed 42, CPU, n_jobs=4.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("val rows", len(vp), "test rows", len(pp), "test pos rate", pp["Survived"].mean().round(3))
+[2026-10-18 23:26:18,408 coder-round-001-experiment-01 INFO] Execution time: 4.07 seconds; success: True.
+<output>val rows 179 test rows 418 test pos rate 0.364</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8324). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:22,553 coder-round-001-experiment-01 INFO] Code iteration 6: RandomForest (0.8324) underperformed LR with engineered features (0.8436). Revert to the best LR pipeline but add one more controlled feature: a binned Fare feature (FareBin via qcut into quantiles) plus log(Fare+1), since fare is skewed and interacts with class. Keep everything else (features, split, seed, LR) identical to the best run. Expected runtime ~1s. If validation accuracy exceeds 0.8436, fare binning helps; otherwise I roll back to the best model. Writes both complete outputs.
+import os, json, joblib, numpy as np, pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    d["LogFare"] = np.log1p(d["Fare"].fillna(d["Fare"].median()))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone", "LogFare"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title"]
+
+pre = ColumnTransformer([
+    ("num", SimpleImputer(strategy="median"), num_cols),
+    ("af", SimpleImputer(strategy="median", add_indicator=True), af_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre),
+                ("lr", LogisticRegression(max_iter=1000, random_state=seed))])
+clf.fit(X_tr, y_tr)
+
+val_pred = (clf.predict_proba(val_f)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "LogisticRegression + Title/FamilySize/IsAlone/LogFare", "seed": seed},
+          open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_fe2.joblib")
+open("work/README.txt", "w").write(
+    "Inference: load model_fe2.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "LR on Pclass,SibSp,Parch,FamilySize,IsAlone,LogFare numeric; Age/Fare median+indicator; "
+    "Sex/Embarked(missing->'M')/Title one-hot. Seed 42, CPU only.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("val rows", len(vp), "test rows", len(pp), "test pos rate", pp["Survived"].mean().round(3))
+[2026-10-18 23:26:22,880 coder-round-001-experiment-01 INFO] Execution time: 0.07 seconds; success: True.
+<output>val rows 179 test rows 418 test pos rate 0.392</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8324). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:26,222 coder-round-001-experiment-01 INFO] Code iteration 7: LogFare (0.8324) hurt vs the best (0.8436), so drop it. Best so far was LR with Title+FamilySize+IsAlone and raw Age/Fare. Now make one controlled regularization change on that exact feature set: add class_weight='balanced' to handle the 62/38 imbalance, keeping features, seed, and split identical. Expected runtime ~1s. If accuracy exceeds 0.8436, class weighting helps; otherwise I restore the exact best model. Writes both complete outputs.
+import os, json, joblib, numpy as np, pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title"]
+
+pre = ColumnTransformer([
+    ("num", SimpleImputer(strategy="median"), num_cols),
+    ("af", SimpleImputer(strategy="median", add_indicator=True), af_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre),
+                ("lr", LogisticRegression(max_iter=1000, random_state=seed,
+                                          class_weight="balanced"))])
+clf.fit(X_tr, y_tr)
+
+val_pred = (clf.predict_proba(val_f)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "LR + Title/FamilySize/IsAlone, class_weight=balanced", "seed": seed},
+          open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_cw.joblib")
+open("work/README.txt", "w").write(
+    "Inference: load model_cw.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "LR(class_weight=balanced) on Pclass,SibSp,Parch,FamilySize,IsAlone numeric; "
+    "Age/Fare median+indicator; Sex/Embarked(missing->'M')/Title one-hot. Seed 42, CPU only.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("val rows", len(vp), "test rows", len(pp), "test pos rate", pp["Survived"].mean().round(3))
+[2026-10-18 23:26:26,556 coder-round-001-experiment-01 INFO] Execution time: 0.05 seconds; success: True.
+<output>val rows 179 test rows 418 test pos rate 0.435</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8268). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:31,029 coder-round-001-experiment-01 INFO] Code iteration 8: Class weighting (0.8268) hurt, so revert to the exact best config (LR + Title/FamilySize/IsAlone, no weighting  0.8436). Now make one controlled addition: also one-hot Pclass as categorical alongside the numeric term would duplicate  instead, try a modest C regularization sweep on the same best feature set, picking C by a small internal 5-fold CV on the 712 training rows (never touching validation labels). Expected runtime ~3s. If a tuned C beats default, adopt it; otherwise keep C=1.0 best. Writes both complete outputs using the chosen model.
+import os, json, joblib, numpy as np, pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title"]
+
+def make_pipeline(C):
+    pre = ColumnTransformer([
+        ("num", SimpleImputer(strategy="median"), num_cols),
+        ("af", SimpleImputer(strategy="median", add_indicator=True), af_cols),
+        ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                          ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+    ])
+    return Pipeline([("pre", pre),
+                     ("lr", LogisticRegression(max_iter=1000, random_state=seed, C=C))])
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+best_C, best_cv = 1.0, -1
+for C in [0.03, 0.1, 0.3, 1.0, 3.0, 10.0]:
+    s = cross_val_score(make_pipeline(C), X_tr, y_tr, cv=cv,
+                        scoring="accuracy", n_jobs=1).mean()
+    print(f"C={C:<5} cv_acc={s:.4f}")
+    if s > best_cv:
+        best_cv, best_C = s, C
+print("chosen C:", best_C, "cv:", round(best_cv,4))
+
+clf = make_pipeline(best_C)
+clf.fit(X_tr, y_tr)
+
+val_pred = (clf.predict_proba(val_f)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "LR + Title/FamilySize/IsAlone, tuned C", "seed": seed,
+           "C": best_C, "cv_acc": best_cv}, open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_best.joblib")
+open("work/README.txt", "w").write(
+    f"Inference: load model_best.joblib (C={best_C}); predict_proba[:,1] >= 0.5 -> 1.\n"
+    "LR on Pclass,SibSp,Parch,FamilySize,IsAlone numeric; Age/Fare median+indicator; "
+    "Sex/Embarked(missing->'M')/Title one-hot. C chosen by 5-fold CV on train only. Seed 42, CPU.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("val rows", len(vp), "test rows", len(pp), "test pos rate", pp["Survived"].mean().round(3))
+[2026-10-18 23:26:31,952 coder-round-001-experiment-01 INFO] Execution time: 0.70 seconds; success: True.
+<output>C=0.03  cv_acc=0.8132
+C=0.1   cv_acc=0.8188
+C=0.3   cv_acc=0.8202
+C=1.0   cv_acc=0.8203
+C=3.0   cv_acc=0.8189
+C=10.0  cv_acc=0.8174
+chosen C: 1.0 cv: 0.8203
+val rows 179 test rows 418 test pos rate 0.39
+<PROJECT_ROOT>/.venv/lib/python3.12/site-packages/sklearn/linear_model/_logistic.py:473: ConvergenceWarning: lbfgs failed to converge after 1000 iteration(s) (status=1):
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT
+Increase the number of iterations to improve the convergence (max_iter=1000).
+You might also want to scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(
+<PROJECT_ROOT>/.venv/lib/python3.12/site-packages/sklearn/linear_model/_logistic.py:473: ConvergenceWarning: lbfgs failed to converge after 1000 iteration(s) (status=1):
+STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT
+Increase the number of iterations to improve the convergence (max_iter=1000).
+You might also want to scale the data as shown in:
+    https://scikit-learn.org/stable/modules/preprocessing.html
+Please also refer to the documentation for alternative solver options:
+    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression
+  n_iter_i = _check_optimize_result(</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:35,861 coder-round-001-experiment-01 INFO] Code iteration 9: Tuning did not help (best C=1.0  still 0.8436 region; also fix the convergence warning by scaling numerics and raising max_iter). Try a genuinely different model family on the same best feature set: HistGradientBoosting / GradientBoosting, which may capture interactions LR misses without the RF overfitting. One controlled change (model family), features/split/seed fixed. Expected runtime ~2s. If it beats 0.8436, tree boosting wins; otherwise I keep LR. Also add StandardScaler on numeric columns and max_iter=2000 to resolve the convergence warnings. Writes both complete outputs.
+import os, json, joblib, numpy as np, pandas as pd, warnings
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+warnings.filterwarnings("ignore")
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title"]
+
+pre = ColumnTransformer([
+    ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]), num_cols),
+    ("af", Pipeline([("imp", SimpleImputer(strategy="median", add_indicator=True)), ("sc", StandardScaler())]), af_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre),
+                ("lr", LogisticRegression(max_iter=2000, random_state=seed))])
+clf.fit(X_tr, y_tr)
+
+val_pred = (clf.predict_proba(val_f)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "LR + Title/FamilySize/IsAlone, scaled", "seed": seed,
+           "note": "scaled numerics, max_iter=2000"}, open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_best.joblib")
+open("work/README.txt", "w").write(
+    "Inference: load model_best.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "LR on scaled numerics (Pclass,SibSp,Parch,FamilySize,IsAlone); Age/Fare median+indicator scaled; "
+    "Sex/Embarked(missing->'M')/Title one-hot. Seed 42, CPU only.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("val rows", len(vp), "test rows", len(pp), "test pos rate", pp["Survived"].mean().round(3),
+      "in-sample", (clf.predict(X_tr)==y_tr).mean().round(4))
+[2026-10-18 23:26:36,162 coder-round-001-experiment-01 INFO] Execution time: 0.05 seconds; success: True.
+<output>val rows 179 test rows 418 test pos rate 0.392 in-sample 0.8258</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:40,254 coder-round-001-experiment-01 INFO] Code iteration 10: Scaling kept the best config at 0.8436 (no regression, warnings fixed). Now try a controlled blending step: keep the best LR and add a GradientBoosting classifier on the same features, averaging predicted probabilities (soft-vote, 0.5 threshold). This tests whether a mild tree booster adds complementary signal to LR without RF's overfitting. One controlled change (ensemble of two known models), same features/split/seed. Expected runtime ~2s. If it beats 0.8436, keep the blend; otherwise revert to the pure best LR. Writes both complete outputs.
+import os, json, joblib, numpy as np, pandas as pd, warnings
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import GradientBoostingClassifier
+warnings.filterwarnings("ignore")
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title"]
+
+def pre():
+    return ColumnTransformer([
+        ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]), num_cols),
+        ("af", Pipeline([("imp", SimpleImputer(strategy="median", add_indicator=True)), ("sc", StandardScaler())]), af_cols),
+        ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                          ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+    ])
+
+lr = Pipeline([("pre", pre()), ("lr", LogisticRegression(max_iter=2000, random_state=seed))])
+gb = Pipeline([("pre", pre()), ("gb", GradientBoostingClassifier(
+    n_estimators=200, max_depth=3, learning_rate=0.05, subsample=0.9, random_state=seed))])
+lr.fit(X_tr, y_tr); gb.fit(X_tr, y_tr)
+
+def blend(df):
+    return 0.5 * lr.predict_proba(df)[:, 1] + 0.5 * gb.predict_proba(df)[:, 1]
+
+val_pred = (blend(val_f) >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (blend(te_f) >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "0.5*LR + 0.5*GradientBoosting", "seed": seed},
+          open("work/metrics.json", "w"), indent=2)
+joblib.dump({"lr": lr, "gb": gb}, "work/model_blend.joblib")
+open("work/README.txt", "w").write(
+    "Inference: load model_blend.joblib (dict lr, gb); prob = 0.5*lr.predict_proba + 0.5*gb.predict_proba; "
+    ">= 0.5 -> 1. Features: Pclass,SibSp,Parch,FamilySize,IsAlone scaled; Age/Fare median+indicator; "
+    "Sex/Embarked(missing->'M')/Title one-hot. Seed 42, CPU only.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("val rows", len(vp), "test rows", len(pp), "test pos rate", pp["Survived"].mean().round(3))
+[2026-10-18 23:26:40,652 coder-round-001-experiment-01 INFO] Execution time: 0.16 seconds; success: True.
+<output>val rows 179 test rows 418 test pos rate 0.366</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:44,735 coder-round-001-experiment-01 INFO] Code iteration 11: The blend matched but didn't beat 0.8436. Final consolidation: restore the exact best model (scaled LR + Title/FamilySize/IsAlone  0.8436), add one last low-risk controlled feature, Cabin-deck letter (first char, missing'X'), which may add signal (deck correlates with class/survival). Same features/split/seed, one added categorical. Expected runtime ~1s. If it exceeds 0.8436, adopt it; otherwise this remains a safe variant. Writes both complete outputs with the best-fitting pipeline and saves the final model/README.
+import os, json, joblib, numpy as np, pandas as pd, warnings
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+warnings.filterwarnings("ignore")
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    d["Deck"] = d["Cabin"].astype(str).str[0].replace("n", "X").fillna("X")
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title", "Deck"]
+
+pre = ColumnTransformer([
+    ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]), num_cols),
+    ("af", Pipeline([("imp", SimpleImputer(strategy="median", add_indicator=True)), ("sc", StandardScaler())]), af_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre), ("lr", LogisticRegression(max_iter=2000, random_state=seed))])
+clf.fit(X_tr, y_tr)
+
+val_pred = (clf.predict_proba(val_f)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "LR + Title/FamilySize/IsAlone/Deck, scaled", "seed": seed,
+           "features": num_cols + af_cols + cat_cols}, open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_final.joblib")
+open("work/README.txt", "w").write(
+    "Inference: load model_final.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "Features: scaled Pclass,SibSp,Parch,FamilySize,IsAlone; Age/Fare median(+indicator) scaled; "
+    "Sex/Embarked(missing->'M')/Title/Deck one-hot (Deck from Cabin first char, missing->X). "
+    "Trained on all 712 train rows. Seed 42, CPU only.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("Deck train dist:", tr_f["Deck"].value_counts().to_dict())
+print("val rows", len(vp), "test rows", len(pp), "test pos rate", pp["Survived"].mean().round(3))
+[2026-10-18 23:26:45,019 coder-round-001-experiment-01 INFO] Execution time: 0.05 seconds; success: True.
+<output>Deck train dist: {'X': 552, 'C': 41, 'B': 34, 'E': 29, 'D': 26, 'A': 14, 'F': 11, 'G': 4, 'T': 1}
+val rows 179 test rows 418 test pos rate 0.404</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:49,617 coder-round-001-experiment-01 INFO] Code iteration 12: Deck held at parity (0.8436), no gain but no loss. After several controlled trials the best remains LR + Title/FamilySize/IsAlone. This final cell reverts to that exact best configuration (raw Age/Fare with missing indicator, scaled numerics, no Deck), reproduces the 0.8436 model, and writes the definitive both output files plus final artifacts. Expected runtime ~1s. This tests rollback-to-best for a clean, reproducible final submission and verifies alignment/schema of both outputs.
+import os, json, joblib, numpy as np, pandas as pd, warnings
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+warnings.filterwarnings("ignore")
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title"]
+
+pre = ColumnTransformer([
+    ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]), num_cols),
+    ("af", Pipeline([("imp", SimpleImputer(strategy="median", add_indicator=True)), ("sc", StandardScaler())]), af_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre), ("lr", LogisticRegression(max_iter=2000, random_state=seed))])
+clf.fit(X_tr, y_tr)
+
+val_prob = clf.predict_proba(val_f)[:, 1]
+val_pred = (val_prob >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "LR + Title/FamilySize/IsAlone (final best)",
+           "seed": seed,
+           "features_numeric": num_cols,
+           "features_agefare": af_cols,
+           "features_cat": cat_cols,
+           "note": "best measured fixed-split validation accuracy across trials"},
+          open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_final.joblib")
+open("work/README.txt", "w").write(
+    "FINAL INFERENCE NOTE\n"
+    "Model: LogisticRegression on engineered Titanic features.\n"
+    "Load work/model_final.joblib; predict_proba[:,1] >= 0.5 -> Survived=1 else 0.\n"
+    "Features: scaled Pclass,SibSp,Parch,FamilySize(=SibSp+Parch+1),IsAlone; "
+    "Age & Fare median-imputed with missing indicators then scaled; "
+    "Sex, Embarked (missing->'M'), Title (Mr/Mrs/Miss/Master/rare->Rare) one-hot.\n"
+    "Trained on all 712 rows of train_data/train.csv. Validation = 179 rows of "
+    "validation_data/validation.csv aligned by PassengerId. Seed 42, CPU only.\n"
+    "Deliverables: predictions.csv (418 rows, PassengerId+Survived), "
+    "work/val_predictions.csv (179 rows).")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert list(vp.columns) == ["PassengerId", "Survived"]
+assert len(pp) == 418 and list(pp.columns) == ["PassengerId", "Survived"]
+assert pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1} and pp["Survived"].dtype.kind in "iu"
+print("FINAL val rows", len(vp), "test rows", len(pp),
+      "val pos rate", vp["Survived"].mean().round(3),
+      "test pos rate", pp["Survived"].mean().round(3))
+print(open("work/README.txt").read())
+[2026-10-18 23:26:49,901 coder-round-001-experiment-01 INFO] Execution time: 0.04 seconds; success: True.
+<output>FINAL val rows 179 test rows 418 val pos rate 0.352 test pos rate 0.392
+FINAL INFERENCE NOTE
+Model: LogisticRegression on engineered Titanic features.
+Load work/model_final.joblib; predict_proba[:,1] >= 0.5 -> Survived=1 else 0.
+Features: scaled Pclass,SibSp,Parch,FamilySize(=SibSp+Parch+1),IsAlone; Age & Fare median-imputed with missing indicators then scaled; Sex, Embarked (missing->'M'), Title (Mr/Mrs/Miss/Master/rare->Rare) one-hot.
+Trained on all 712 rows of train_data/train.csv. Validation = 179 rows of validation_data/validation.csv aligned by PassengerId. Seed 42, CPU only.
+Deliverables: predictions.csv (418 rows, PassengerId+Survived), work/val_predictions.csv (179 rows).</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:53,029 coder-round-001-experiment-01 INFO] Code iteration 13: Verify final state: reload work/model_final.joblib, re-run inference from the saved artifacts, and confirm both prediction files exactly match the persisted outputs (reproducibility) with correct schema, ordering, and 0/1 integers. Expected runtime <1s. This tests that the delivered artifacts are self-consistent and that a fresh reload reproduces the same predictions  protecting against silent drift between saved model and exported files. No model change.
+import json, joblib, pandas as pd, numpy as np
+base = "../input/data"
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+clf = joblib.load("work/model_final.joblib")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    return d
+
+_re_val = (clf.predict_proba(featurize(val))[:, 1] >= 0.5).astype(int)
+_re_test = (clf.predict_proba(featurize(test))[:, 1] >= 0.5).astype(int)
+
+vp = pd.read_csv("work/val_predictions.csv")
+pp = pd.read_csv("predictions.csv")
+
+# schema + alignment checks
+assert list(vp.columns) == ["PassengerId", "Survived"] and len(vp) == 179
+assert list(pp.columns) == ["PassengerId", "Survived"] and len(pp) == 418
+assert vp["PassengerId"].tolist() == val["PassengerId"].tolist()
+assert pp["PassengerId"].tolist() == test["PassengerId"].tolist()
+assert set(vp["Survived"].unique()) <= {0,1} and set(pp["Survived"].unique()) <= {0,1}
+
+# reproducibility: saved files equal fresh reload predictions
+assert (vp["Survived"].values == _re_val).all(), "val drift"
+assert (pp["Survived"].values == _re_test).all(), "test drift"
+
+print("Reproducibility OK. Saved predictions match reloaded model.")
+print("val rows", len(vp), "| test rows", len(pp))
+print("metrics.json:\n", open("work/metrics.json").read())
+print("Deliverables confirmed: predictions.csv + work/val_predictions.csv")
+[2026-10-18 23:26:53,328 coder-round-001-experiment-01 INFO] Execution time: 0.03 seconds; success: True.
+<output>Reproducibility OK. Saved predictions match reloaded model.
+val rows 179 | test rows 418
+metrics.json:
+ {
+  "model": "LR + Title/FamilySize/IsAlone (final best)",
+  "seed": 42,
+  "features_numeric": [
+    "Pclass",
+    "SibSp",
+    "Parch",
+    "FamilySize",
+    "IsAlone"
+  ],
+  "features_agefare": [
+    "Age",
+    "Fare"
+  ],
+  "features_cat": [
+    "Sex",
+    "Embarked",
+    "Title"
+  ],
+  "note": "best measured fixed-split validation accuracy across trials"
+}
+Deliverables confirmed: predictions.csv + work/val_predictions.csv</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:26:55,625 coder-round-001-experiment-01 INFO] Code iteration 14: All controlled single-factor changes (RandomForest, LogFare, class_weight, C-tuning, LR+GB blend, Deck) failed to exceed 0.8436, and the final best model is restored, verified for reproducibility, and both outputs are written. The task is complete with no further improvement available within the low-risk single-factor budget. This final cell is a no-op confirmation that re-states the chosen deliverables and metrics from disk (no model change, no new writes beyond re-affirming schema), so the round ends cleanly with the best-measured configuration in place.
+import json, pandas as pd
+# Confirmation only: no model change. Re-affirm on-disk deliverables.
+vp = pd.read_csv("work/val_predictions.csv")
+pp = pd.read_csv("predictions.csv")
+assert list(pp.columns) == ["PassengerId","Survived"] and len(pp) == 418
+assert list(vp.columns) == ["PassengerId","Survived"] and len(vp) == 179
+assert set(pp["Survived"].unique()) <= {0,1}
+summary = {
+    "status": "complete",
+    "best_model": "LogisticRegression + Title/FamilySize/IsAlone (scaled, Age/Fare median+indicator)",
+    "seed": 42,
+    "val_prediction_file": "work/val_predictions.csv",
+    "business_prediction_file": "predictions.csv",
+    "val_rows": len(vp),
+    "test_rows": len(pp),
+    "note": "No further single-factor improvement exceeded the best measured validation accuracy; best configuration retained.",
+}
+print(json.dumps(summary, indent=2))
+[2026-10-18 23:26:55,926 coder-round-001-experiment-01 INFO] Execution time: 0.01 seconds; success: True.
+<output>{
+  "status": "complete",
+  "best_model": "LogisticRegression + Title/FamilySize/IsAlone (scaled, Age/Fare median+indicator)",
+  "seed": 42,
+  "val_prediction_file": "work/val_predictions.csv",
+  "business_prediction_file": "predictions.csv",
+  "val_rows": 179,
+  "test_rows": 418,
+  "note": "No further single-factor improvement exceeded the best measured validation accuracy; best configuration retained."
+}</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:27:01,124 coder-round-001-experiment-01 INFO] Code iteration 15: Best model is LR + Title/FamilySize/IsAlone (0.8436). Test one new controlled feature addition on that exact model: an AgeBin categorical (child/teen/adult/senior via fixed thresholds fit deterministically), which lets LR capture the non-linear age-survival relationship without a nonlinear model. All other features, split, seed, scaling, and thresholds fixed. Expected runtime ~1s. If validation accuracy exceeds 0.8436, AgeBin adds signal; otherwise revert to prior best. Writes both complete outputs.
+import os, json, joblib, numpy as np, pandas as pd, warnings
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+warnings.filterwarnings("ignore")
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    age = d["Age"]
+    d["AgeBin"] = pd.cut(age, bins=[-1, 12, 18, 60, 200],
+                         labels=["child","teen","adult","senior"]).astype(str)
+    d.loc[age.isna(), "AgeBin"] = "unknown"
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title", "AgeBin"]
+
+pre = ColumnTransformer([
+    ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]), num_cols),
+    ("af", Pipeline([("imp", SimpleImputer(strategy="median", add_indicator=True)), ("sc", StandardScaler())]), af_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre), ("lr", LogisticRegression(max_iter=2000, random_state=seed))])
+clf.fit(X_tr, y_tr)
+
+val_pred = (clf.predict_proba(val_f)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "LR + Title/FamilySize/IsAlone/AgeBin", "seed": seed,
+           "features": num_cols + af_cols + cat_cols}, open("work/metrics.json","w"), indent=2)
+joblib.dump(clf, "work/model_agebin.joblib")
+open("work/README.txt","w").write(
+    "Inference: load model_agebin.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "LR on scaled Pclass,SibSp,Parch,FamilySize,IsAlone; Age/Fare median+indicator scaled; "
+    "Sex/Embarked(missing->'M')/Title/AgeBin one-hot (AgeBin child<=12, teen<=18, adult<=60, senior, unknown). "
+    "Trained on 712 rows. Seed 42, CPU only.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("val pos rate", vp["Survived"].mean().round(3), "test pos rate", pp["Survived"].mean().round(3))
+[2026-10-18 23:27:01,437 coder-round-001-experiment-01 INFO] Execution time: 0.05 seconds; success: True.
+<output>val pos rate 0.352 test pos rate 0.388</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:27:06,022 coder-round-001-experiment-01 INFO] Code iteration 16: AgeBin held at parity (0.8436)  adding it did not help. Revert to the exact best configuration (LR + Title/FamilySize/IsAlone, no AgeBin/Deck/LogFare) and rewrite both complete outputs with that best model, saving final artifacts. Expected runtime ~1s. This restores the definitive best-measured model as the final deliverable and re-verifies schema/alignment. Writes both complete outputs.
+import os, json, joblib, numpy as np, pandas as pd, warnings
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+warnings.filterwarnings("ignore")
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    title = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    title = title.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    rare = ~title.isin(["Mr","Mrs","Miss","Master"])
+    d["Title"] = np.where(rare, "Rare", title.fillna("Rare"))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass", "SibSp", "Parch", "FamilySize", "IsAlone"]
+af_cols = ["Age", "Fare"]
+cat_cols = ["Sex", "Embarked", "Title"]
+
+pre = ColumnTransformer([
+    ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]), num_cols),
+    ("af", Pipeline([("imp", SimpleImputer(strategy="median", add_indicator=True)), ("sc", StandardScaler())]), af_cols),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="constant", fill_value="M")),
+                      ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+])
+clf = Pipeline([("pre", pre), ("lr", LogisticRegression(max_iter=2000, random_state=seed))])
+clf.fit(X_tr, y_tr)
+
+val_pred = (clf.predict_proba(val_f)[:, 1] >= 0.5).astype(int)
+pd.DataFrame({"PassengerId": val_ids, "Survived": val_pred}).to_csv(
+    "work/val_predictions.csv", index=False)
+
+test_pred = (clf.predict_proba(te_f)[:, 1] >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId": te_f["PassengerId"].values, "Survived": test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model": "LR + Title/FamilySize/IsAlone (final best)", "seed": seed,
+           "features_numeric": num_cols, "features_agefare": af_cols, "features_cat": cat_cols},
+          open("work/metrics.json", "w"), indent=2)
+joblib.dump(clf, "work/model_final.joblib")
+open("work/README.txt", "w").write(
+    "FINAL: load model_final.joblib; predict_proba[:,1] >= 0.5 -> 1.\n"
+    "LR on scaled Pclass,SibSp,Parch,FamilySize,IsAlone; Age/Fare median+indicator scaled; "
+    "Sex/Embarked(missing->'M')/Title one-hot. Trained on 712 rows. Seed 42, CPU only.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist() == val_ids and len(vp) == 179
+assert len(pp) == 418 and pp["PassengerId"].tolist() == te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique()) <= {0, 1}
+print("FINAL restored best. val rows", len(vp), "test rows", len(pp),
+      "val pos", vp["Survived"].mean().round(3), "test pos", pp["Survived"].mean().round(3))
+[2026-10-18 23:27:06,324 coder-round-001-experiment-01 INFO] Execution time: 0.04 seconds; success: True.
+<output>FINAL restored best. val rows 179 test rows 418 val pos 0.352 test pos 0.392</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:27:09,095 coder-round-001-experiment-01 INFO] Code iteration 17: No further model change. Confirm the on-disk best-model deliverables (predictions.csv 418 rows, work/val_predictions.csv 179 rows, correct schema/order/0-1 integers) are intact after the restoration cell. Expected runtime <1s. This locks in the best-measured configuration and guarantees the exported files match the saved model_final.joblib without drift.
+import joblib, pandas as pd, numpy as np
+base = "../input/data"
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+clf = joblib.load("work/model_final.joblib")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    t = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    t = t.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    d["Title"] = np.where(~t.isin(["Mr","Mrs","Miss","Master"]), "Rare", t.fillna("Rare"))
+    return d
+
+_v = (clf.predict_proba(featurize(val))[:,1] >= 0.5).astype(int)
+_t = (clf.predict_proba(featurize(test))[:,1] >= 0.5).astype(int)
+vp = pd.read_csv("work/val_predictions.csv"); pp = pd.read_csv("predictions.csv")
+
+assert list(vp.columns)==["PassengerId","Survived"] and len(vp)==179
+assert list(pp.columns)==["PassengerId","Survived"] and len(pp)==418
+assert vp["PassengerId"].tolist()==val["PassengerId"].tolist()
+assert pp["PassengerId"].tolist()==test["PassengerId"].tolist()
+assert set(vp["Survived"].unique())<={0,1} and set(pp["Survived"].unique())<={0,1}
+assert (vp["Survived"].values==_v).all() and (pp["Survived"].values==_t).all()
+print("OK: deliverables reproducible and schema-valid. val=179 test=418. Best config locked.")
+[2026-10-18 23:27:09,384 coder-round-001-experiment-01 INFO] Execution time: 0.03 seconds; success: True.
+<output>OK: deliverables reproducible and schema-valid. val=179 test=418. Best config locked.</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:27:11,301 coder-round-001-experiment-01 INFO] Code iteration 18: Final closure: re-affirm the locked best-model deliverables are present and valid on disk. No model change, no retraining. Expected runtime <1s. Confirms the round ends with predictions.csv (418 rows) and work/val_predictions.csv (179 rows) matching the saved model_final.joblib, with model, preprocessing, and inference notes saved in the working directory.
+import json, os, pandas as pd
+pp = pd.read_csv("predictions.csv"); vp = pd.read_csv("work/val_predictions.csv")
+arts = [f for f in ["work/model_final.joblib","work/metrics.json","work/README.txt","work/val_ids.json"] if os.path.exists(f)]
+print(json.dumps({
+    "status": "complete - best config locked at measured 0.8436",
+    "business_prediction": {"file":"predictions.csv","rows":len(pp),"cols":list(pp.columns)},
+    "validation_prediction": {"file":"work/val_predictions.csv","rows":len(vp),"cols":list(vp.columns)},
+    "artifacts_present": arts,
+}, indent=2))
+[2026-10-18 23:27:11,584 coder-round-001-experiment-01 INFO] Execution time: 0.01 seconds; success: True.
+<output>{
+  "status": "complete - best config locked at measured 0.8436",
+  "business_prediction": {
+    "file": "predictions.csv",
+    "rows": 418,
+    "cols": [
+      "PassengerId",
+      "Survived"
+    ]
+  },
+  "validation_prediction": {
+    "file": "work/val_predictions.csv",
+    "rows": 179,
+    "cols": [
+      "PassengerId",
+      "Survived"
+    ]
+  },
+  "artifacts_present": [
+    "work/model_final.joblib",
+    "work/metrics.json",
+    "work/README.txt",
+    "work/val_ids.json"
+  ]
+}</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:27:13,347 coder-round-001-experiment-01 INFO] Code iteration 19: Terminal confirmation only. The best model (LR + Title/FamilySize/IsAlone, 0.8436) is locked, and both prediction files plus artifacts are verified. No further changes. Expected runtime <1s. Confirms end-of-round state: predictions.csv (418 rows) and work/val_predictions.csv (179 rows) remain intact and are the deliverable outputs.
+import pandas as pd
+pp = pd.read_csv("predictions.csv"); vp = pd.read_csv("work/val_predictions.csv")
+assert list(pp.columns) == ["PassengerId","Survived"] and len(pp) == 418
+assert list(vp.columns) == ["PassengerId","Survived"] and len(vp) == 179
+print("Done. Business predictions:", len(pp), "rows | Validation predictions:", len(vp), "rows | Best model locked.")
+[2026-10-18 23:27:13,609 coder-round-001-experiment-01 INFO] Execution time: 0.01 seconds; success: True.
+<output>Done. Business predictions: 418 rows | Validation predictions: 179 rows | Best model locked.</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8436). Best so far: Metric(0.8436).
+
+[2026-10-18 23:27:17,891 coder-round-001-experiment-01 INFO] Code iteration 20: Best is LR (0.8436). Untried single controlled change: soft-vote 0.5*LR + 0.5*ExtraTrees (different ensemble family than RF/GB already tried, which regressed). ExtraTrees with min_samples_leaf regularization and shallow depth may add complementary variance without RF-style overfit. Features/split/seed fixed. Expected runtime ~2s. If validation accuracy exceeds 0.8436, adopt; else revert to pure best LR. Writes both complete outputs.
+import os, json, joblib, numpy as np, pandas as pd, warnings
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import ExtraTreesClassifier
+warnings.filterwarnings("ignore")
+
+seed = 42
+base = "../input/data"
+train = pd.read_csv(f"{base}/train_data/train.csv")
+val = pd.read_csv(f"{base}/validation_data/validation.csv")
+test = pd.read_csv(f"{base}/predict_data/test.csv")
+
+def featurize(df):
+    d = df.copy()
+    d["FamilySize"] = d["SibSp"] + d["Parch"] + 1
+    d["IsAlone"] = (d["FamilySize"] == 1).astype(int)
+    t = d["Name"].str.extract(r",\s*([^.]+)\.", expand=False)
+    t = t.replace({"Mlle":"Miss","Ms":"Miss","Mme":"Mrs"})
+    d["Title"] = np.where(~t.isin(["Mr","Mrs","Miss","Master"]), "Rare", t.fillna("Rare"))
+    return d
+
+tr_f, val_f, te_f = featurize(train), featurize(val), featurize(test)
+X_tr = tr_f.drop(columns=["Survived"]); y_tr = tr_f["Survived"].values
+val_ids = val_f["PassengerId"].tolist()
+
+num_cols = ["Pclass","SibSp","Parch","FamilySize","IsAlone"]
+af_cols = ["Age","Fare"]
+cat_cols = ["Sex","Embarked","Title"]
+
+def pre():
+    return ColumnTransformer([
+        ("num", Pipeline([("imp",SimpleImputer(strategy="median")),("sc",StandardScaler())]), num_cols),
+        ("af", Pipeline([("imp",SimpleImputer(strategy="median",add_indicator=True)),("sc",StandardScaler())]), af_cols),
+        ("cat", Pipeline([("imp",SimpleImputer(strategy="constant",fill_value="M")),
+                          ("oh",OneHotEncoder(handle_unknown="ignore"))]), cat_cols),
+    ])
+
+lr = Pipeline([("pre",pre()),("lr",LogisticRegression(max_iter=2000,random_state=seed))])
+et = Pipeline([("pre",pre()),("et",ExtraTreesClassifier(n_estimators=400,max_depth=6,
+                min_samples_leaf=4,random_state=seed,n_jobs=4))])
+lr.fit(X_tr,y_tr); et.fit(X_tr,y_tr)
+
+def blend(df):
+    return 0.5*lr.predict_proba(df)[:,1] + 0.5*et.predict_proba(df)[:,1]
+
+val_pred = (blend(val_f) >= 0.5).astype(int)
+pd.DataFrame({"PassengerId":val_ids,"Survived":val_pred}).to_csv("work/val_predictions.csv", index=False)
+test_pred = (blend(te_f) >= 0.5).astype(int)
+pp = pd.DataFrame({"PassengerId":te_f["PassengerId"].values,"Survived":test_pred})
+pp.to_csv("predictions.csv", index=False)
+
+json.dump({"model":"0.5*LR + 0.5*ExtraTrees","seed":seed}, open("work/metrics.json","w"), indent=2)
+joblib.dump({"lr":lr,"et":et}, "work/model_blend_et.joblib")
+open("work/README.txt","w").write(
+    "Inference: load model_blend_et.joblib; prob=0.5*lr.predict_proba+0.5*et.predict_proba; "
+    ">=0.5 -> 1. Features as best LR. Seed 42, CPU, n_jobs=4.")
+
+vp = pd.read_csv("work/val_predictions.csv")
+assert vp["PassengerId"].tolist()==val_ids and len(vp)==179
+assert len(pp)==418 and pp["PassengerId"].tolist()==te_f["PassengerId"].tolist()
+assert set(pp["Survived"].unique())<={0,1}
+print("val pos", vp["Survived"].mean().round(3), "test pos", pp["Survived"].mean().round(3))
+[2026-10-18 23:27:18,391 coder-round-001-experiment-01 INFO] Execution time: 0.27 seconds; success: True.
+<output>val pos 0.346 test pos 0.383</output>
+<error></error>
+Use this evidence to repair failures or test the next controlled improvement.
+
+Measured fixed-split validation metric: Metric(0.8492). Best so far: Metric(0.8492).
+

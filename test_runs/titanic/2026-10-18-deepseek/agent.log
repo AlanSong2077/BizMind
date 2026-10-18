@@ -1,0 +1,7 @@
+[2026-10-18 23:25:20,254 Agent INFO] Local execution platform: Darwin; CPU logical cores: 8.
+Selected training device: cpu.
+Use CPU training. Do not require CUDA, NVIDIA tools, or an MPS accelerator.
+In notebook code, os.environ['BIZMIND_DEVICE'] identifies the selected backend. Respect CPU limits and scale batch/model sizes to available memory; no GPU memory reservation is provided.
+[2026-10-18 23:25:37,050 Agent INFO] Local experiment round 1
+[2026-10-18 23:27:34,196 Agent INFO] Local experiment round 2
+[2026-10-18 23:30:57,528 Agent INFO] Local experiment round 3

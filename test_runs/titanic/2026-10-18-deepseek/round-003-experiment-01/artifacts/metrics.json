@@ -1,0 +1,13 @@
+{
+  "seed": 42,
+  "round": "final_idempotent",
+  "chosen": {
+    "w": 0.5,
+    "depth": 6,
+    "leaf": 4,
+    "threshold": 0.5
+  },
+  "external_incumbent_reference_acc": 0.8492,
+  "md5_val": "cceba64816",
+  "md5_test": "42c718fef6"
+}

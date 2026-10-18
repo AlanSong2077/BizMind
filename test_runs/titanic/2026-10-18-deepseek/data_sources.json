@@ -1,0 +1,41 @@
+{
+  "source": "Kaggle Titanic official competition download",
+  "download_url": "https://www.kaggle.com/api/v1/competitions/data/download-all/titanic",
+  "downloaded_at_utc": "2026-10-18T15:18:04.398053+00:00",
+  "files": {
+    "train.csv": {
+      "bytes": 61194,
+      "sha256": "7d118fef8b6ccf7f81111877bc388536f7b1e498a655e3d649d19aaa010e9f6f"
+    },
+    "test.csv": {
+      "bytes": 28629,
+      "sha256": "56023b9948236f3c7a1c9448fcf418b283e109ef177fa8c7e069158dd7dd52b2"
+    },
+    "gender_submission.csv": {
+      "bytes": 3258,
+      "sha256": "7a262a7f4cb807f53911dccc84257ed3976b21b7b50ffc468b58446bff8bb6a4"
+    }
+  },
+  "pages_api": "https://www.kaggle.com/api/i/competitions.PageService/ListPages",
+  "competition_url": "https://www.kaggle.com/c/titanic",
+  "documents": {
+    "description.md": {
+      "official_page_name": "Description",
+      "mime_type": "text/markdown",
+      "bytes": 6537,
+      "sha256": "a96b1afbcbcba9c33dbc18e7adbfcb25f0f606974be640002d767e0af406edab"
+    },
+    "evaluation.html": {
+      "official_page_name": "Evaluation",
+      "mime_type": "text/html",
+      "bytes": 1039,
+      "sha256": "5cac5c690035bbfaf25a992b864387acd93894005aa2af05579f6808233f7a10"
+    },
+    "data_description.html": {
+      "official_page_name": "data-description",
+      "mime_type": "text/html",
+      "bytes": 2699,
+      "sha256": "5e940a2ffb025e92b99302655f8a094de3c3233e21d6dbcb3f3e2f84a3e27aeb"
+    }
+  }
+}
