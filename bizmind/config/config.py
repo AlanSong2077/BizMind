@@ -9,7 +9,7 @@ import yaml
 
 @dataclass
 class LLMConfig:
-    model: str = "gpt-5-mini"
+    model: str = "deepseek/deepseek-flash"
     params: dict[str, Any] = field(default_factory=dict)
     max_retries: int = 3
 
@@ -87,7 +87,7 @@ class Config:
                 values[name] = value
         model = dict(document.get("llm", {}))
         values["llm"] = LLMConfig(
-            model=model.pop("model", "gpt-5-mini"), max_retries=model.pop("max_retries", 3), params=model)
+            model=model.pop("model", "deepseek/deepseek-flash"), max_retries=model.pop("max_retries", 3), params=model)
         return cls(**values)
 
     def to_yaml(self, yaml_path: Path) -> None:
