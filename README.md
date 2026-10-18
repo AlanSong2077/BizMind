@@ -19,15 +19,6 @@ Agent finished a good model selection task before running code, and agents conta
 - **Titanic:** LLM chooses LogisticRegression and ExtraTreesClassifier to optimize.
 - **Give Me Some Credit:** LLM chooses LightGBM with 371 trees, 15 leaves and learning rate 0.03 per model.
 
-
-| Task / round | Executed changes and outcome | Best local result |
-| --- | --- | ---: |
-| Titanic /round 1 | Built a logistic baseline, added name-derived titles and family features, tested tree models, and selected the LogisticRegression + ExtraTrees blend. | **84.92% accuracy** |
-| Titanic /round 2 | Tested blend weights, ExtraTrees parameters and feature interactions. Trials tied or regressed, so the first-round model was retained. | **84.92% accuracy** |
-| Titanic /round 3 | Tested cabin deck, title-based age imputation and a GradientBoosting branch. No improvement; retained the existing best model. | **84.92% accuracy** |
-| Credit /round 1 | Improved the approximately 0.8680-AUC baseline through missing/sentinel flags, ratio and interaction features, LightGBM tuning and blending trials. Selected 33 features with a five-seed LightGBM average. | **0.870504 ROC-AUC** |
-| Credit /round 2 | Compared 8-, 12- and 24-seed averages, tail transforms, tree variants and a logistic branch. The 24-seed average scored highest; the gain over round 1 was approximately 0.000069 AUC. | **0.870573 ROC-AUC** |
-
 Finally, Logs were writed in test files, recording all the improvements, metrics, exceptions, LLM coding error during loop.
 
 ## Run
