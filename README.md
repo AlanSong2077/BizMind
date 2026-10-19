@@ -28,6 +28,6 @@ Training and prediction CSVs are included in [data/](data/README.md). Install th
 You can build your task including task description, overview, trainning data, testing data,  init code to begin a new work.
 
 ## Cost
-These Graphs shows the cost of finishing titianic task during executing.
+These Graphs shows the cost of executing titianic task.
 <img width="1548" height="1430" alt="image" src="https://github.com/user-attachments/assets/5e96b94b-ae73-4664-955a-63e38150d067" />
 
