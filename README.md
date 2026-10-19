@@ -2,9 +2,8 @@ BizMind is an AI agent for business-driven machine learning that improves models
 
 ## Experiment results
 
-Both experiments used DeepSeek Flash to plan and generate code, with model training
-on CPU using four threads. A fixed stratified 80/20 split with seed 42 was reused
-across all rounds. Scores below are local validation results.
+Both experiments used DeepSeek Flash to plan and generate code, with model training on CPU using four threads. A fixed stratified 80/20 split with seed 42 was reused across all rounds. Scores below are local validation results.
+Compared to ChatGPT series model, there are some disvantages in the coding quality of Deepseek generation, but costed more less.
 
 | Task | Training / validation rows | Prediction rows | Rounds | Best method | Result |
 | --- | ---: | ---: | ---: | --- | --- |
